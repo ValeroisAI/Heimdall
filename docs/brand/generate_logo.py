@@ -69,18 +69,35 @@ def svg_glyph(c: dict) -> str:  # zeminsiz zikzak
             f'{glyph_body(c, "gg", 0.95, 2.5, 2.5, 10)}</svg>\n')
 
 
-def tile_body(c: dict, gid: str) -> str:
+def tile_body(c: dict, gid: str, rx: float = 24, sc: float = 0.70, sw: float = 12) -> str:
     # 100x100 yuvarlak köşeli kare, içinde ortalanmış zikzak (zikzağın kutusu 79.5x89 → ölçek 0.70)
-    sc = 0.70
     w = (ZIG[-1][0] - ZIG[0][0]) * sc; h = (ZIG[1][1] - ZIG[0][1]) * sc
     ox = (100 - w) / 2 - ZIG[0][0] * sc; oy = (100 - h) / 2 - ZIG[0][1] * sc
     return (f'<defs><linearGradient id="{gid}t" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{c["tile0"]}"/>'
             f'<stop offset="1" stop-color="{c["tile1"]}"/></linearGradient></defs>'
-            f'<rect width="100" height="100" rx="24" fill="url(#{gid}t)"' + (' stroke="#a07cff" stroke-opacity=".30" stroke-width="1.2"' if c is DARK else '') + '/>' + glyph_body(c, gid, sc, ox, oy, 12))
+            f'<rect width="100" height="100" rx="{rx}" fill="url(#{gid}t)"' + (' stroke="#a07cff" stroke-opacity=".30" stroke-width="1.2"' if (c is DARK and rx) else '') + '/>' + glyph_body(c, gid, sc, ox, oy, sw))
 
 
 def svg_mark(c: dict) -> str:
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Valerois">{tile_body(c, "gm")}</svg>\n'
+
+
+def svg_pfp(c: dict) -> str:
+    # profil resmi: tam kare (köşe yuvarlama yok; platform daireye kırpar), zikzak dairenin güvenli alanında
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Valerois">'
+            f'{tile_body(c, "gp", rx=0, sc=0.56, sw=10.5)}</svg>\n')
+
+
+def svg_banner() -> str:
+    body, total = wordmark(DARK, "gb")
+    mk, gap = 100, 36
+    lw = mk + gap + total + 6
+    s = 1.55
+    x0 = (1500 - lw * s) / 2; y0 = (500 - 100 * s) / 2
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 500" role="img" aria-label="Valerois">'
+            f'<defs><linearGradient id="bgb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1d1233"/><stop offset="1" stop-color="#0c0614"/></linearGradient></defs>'
+            f'<rect width="1500" height="500" fill="url(#bgb)"/>'
+            f'<g transform="translate({x0:.1f} {y0:.1f}) scale({s})">{tile_body(DARK, "gbk")}<g transform="translate({mk + gap} 0)">{body}</g></g></svg>\n')
 
 
 def svg_lockup(c: dict, tile_c: dict) -> str:
@@ -101,6 +118,9 @@ def main() -> None:
         "valerois-wordmark-on-dark.svg": svg_wordmark(DARK),
         "valerois-lockup-on-light.svg": svg_lockup(LIGHT, DARK),  # koyu simge + koyu yazı, açık zemin
         "valerois-lockup-on-dark.svg": svg_lockup(DARK, DARK),
+        "valerois-pfp-dark.svg": svg_pfp(DARK),
+        "valerois-pfp-light.svg": svg_pfp(LIGHT),
+        "valerois-banner-dark.svg": svg_banner(),
     }
     for name, s in files.items():
         (OUT / name).write_text(s)
