@@ -1,0 +1,32 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Heimdall benchmark card</title>
+<style>
+:root{--bg:#0f141b;--card:#161d27;--line:#2a3340;--fg:#e8ecf2;--mut:#99a3b3;--acc:#58a6ff;--hl:rgba(88,166,255,.13)}
+*{box-sizing:border-box}body{margin:0;width:1200px;height:675px;background:var(--bg);color:var(--fg);font:16px/1.35 "Inter","Helvetica Neue",system-ui,sans-serif;display:flex;flex-direction:column;padding:24px 40px 18px}
+h1{font-size:28px;margin:0;letter-spacing:-.3px;white-space:nowrap}h1 em{font-style:normal;color:var(--acc)}
+.sub{color:var(--mut);margin:4px 0 12px;font-size:15px;white-space:nowrap}
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{padding:4px 14px;text-align:right;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+thead th{font-weight:500;color:var(--mut);font-size:13px;line-height:1.15;padding:6px 14px}thead th b{color:var(--fg);font-size:15px}
+tbody th{text-align:left;font-weight:600;font-size:16px;width:26%;line-height:1.15}tbody th span{display:block;font-weight:400;color:var(--mut);font-size:12px}
+td{font-size:20px;font-weight:500;color:var(--mut)}td.best{color:var(--fg);font-weight:800}td.best::after{content:"";}
+td.hl,thead th.hl{background:var(--hl)}thead th.hl b{color:var(--acc)}td.hl{color:var(--fg)}
+tr.tok th,tr.tok td{font-size:14px;border-bottom:0;color:var(--mut);font-weight:500;padding-top:6px;padding-bottom:6px}tr.tok th{font-weight:500}
+tr.tok td.hl{color:var(--acc);font-weight:700}
+.foot{margin-top:auto;display:flex;justify-content:space-between;align-items:flex-end;color:var(--mut);font-size:12.5px;line-height:1.5}
+.foot b{color:var(--fg)}.repo{color:var(--acc);font-size:15px;font-weight:600;white-space:nowrap}
+</style><body>
+<h1><em>Heimdall-Bit</em> 337M vs small public models &mdash; zero-shot benchmarks</h1>
+<div class="sub">1-bit FFN &middot; hybrid DeltaNet + attention &middot; trained on <b style="color:var(--fg)">one 16&nbsp;GB consumer GPU</b> (RX&nbsp;9070&nbsp;XT) in ~4 days &middot; <span style="color:var(--acc);font-weight:600">github.com/valeroisai/bifrost</span></div>
+<table><thead><tr><th></th><th class="hl">Heimdall-Bit<br><b>337M</b></th><th class="">GPT-2<br>124M</th><th class="">Pythia<br>160M</th><th class="">Pythia<br>410M</th><th class="">SmolLM2<br>135M</th></tr></thead>
+<tbody>
+<tr><th>ARC-easy<span>acc</span></th><td class="hl ">45.0</td><td class="">43.8</td><td class="">43.2</td><td class="">51.9</td><td class="best">64.3</td></tr>
+<tr><th>ARC-challenge<span>acc_norm</span></th><td class="hl ">23.9</td><td class="">22.7</td><td class="">23.1</td><td class="">24.2</td><td class="best">29.7</td></tr>
+<tr><th>HellaSwag<span>acc_norm</span></th><td class="hl ">32.0</td><td class="">31.1</td><td class="">30.2</td><td class="">40.5</td><td class="best">43.2</td></tr>
+<tr><th>PIQA<span>acc</span></th><td class="hl ">60.8</td><td class="">62.9</td><td class="">62.1</td><td class="">66.7</td><td class="best">68.3</td></tr>
+<tr><th>Winogrande<span>acc</span></th><td class="hl ">49.2</td><td class="">51.6</td><td class="">52.6</td><td class="best">53.8</td><td class="">53.4</td></tr>
+<tr><th>LAMBADA †<span>acc</span></th><td class="hl ">22.5</td><td class="">32.6</td><td class="">32.7</td><td class="best">51.5</td><td class="">43.0</td></tr>
+<tr><th>WikiText<span>word-perplexity ↓</span></th><td class="hl ">41.7</td><td class="">37.4</td><td class="">33.5</td><td class="best">20.1</td><td class="">23.1</td></tr>
+<tr class="tok"><th>Training tokens</th><td class="hl">3.7B</td><td class="">WebText</td><td class="">~300B</td><td class="">~300B</td><td class="">~2T</td></tr>
+</tbody></table>
+<div class="foot"><div><b>Bold = best in row.</b> 0-shot, lm-evaluation-harness, same machine, single run (&plusmn;~1 pt). Base models, no instruction tuning.<br>Heimdall saw ~80&times; fewer tokens than Pythia but has 2&times; the parameters. On par with GPT-2 / Pythia-160M on ARC &amp; HellaSwag; behind on PIQA, LAMBADA, WikiText.<br>&dagger; LAMBADA depends on the tokenizer (ours: 8K vocab). The effect of the 1-bit FFN is not isolated (no dense baseline yet).</div></div>
+</body></html>
