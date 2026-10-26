@@ -1,6 +1,12 @@
+<p><picture><source media="(prefers-color-scheme: dark)" srcset="docs/brand/valerois-wordmark-on-dark-2400.png"><img alt="Valerois" src="docs/brand/valerois-wordmark-on-light-2400.png" height="36"></picture></p>
+
 # Valerois AI — Heimdall
 
 **Training small language models efficiently on a single consumer AMD GPU, with latent-free 1-bit feed-forward layers and a constant-memory hybrid architecture.**
+
+![Zero-shot benchmarks: Heimdall-Bit 337M vs GPT-2, Pythia, SmolLM2](docs/benchmark_card.png)
+
+*0-shot, lm-evaluation-harness, same machine, single run (±~1 point). Details, caveats and the full discussion: [Key results, section 8](#key-results).*
 
 Heimdall is a from-scratch research codebase (PyTorch, ROCm/CUDA) containing:
 
