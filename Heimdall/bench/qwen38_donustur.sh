@@ -26,6 +26,11 @@
 set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.."
+# sanal ortam açık değilse Heimdall/.venv101'i kendisi açar
+if [ -z "${VIRTUAL_ENV:-}" ] && [ -f .venv101/bin/activate ]; then
+  # shellcheck disable=SC1091
+  source .venv101/bin/activate
+fi
 ADIM=${ADIM:-plan}
 PY=${PY:-python}
 MODEL=${MODEL:-Qwen/Qwen3.8-27B}
@@ -43,6 +48,7 @@ CTX=${CTX:-131072}
 GGUF_TIP=${GGUF_TIP:-q8_0}   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
 hf_dir() { $PY -c "from heimdall.donustur import fetch_model; print(fetch_model('$1'))"; }
 H="$PY -m heimdall.donustur_hibrit"
+command -v "$PY" >/dev/null || { echo "python bulunamadı: önce 'source .venv101/bin/activate' (ya da PY=python3)"; exit 1; }
 
 if [[ $ADIM == prova ]]; then
   M=Qwen/Qwen3.5-0.8B; O=runs/q35_08b_prova; V=veri/qwen_wiki_prova

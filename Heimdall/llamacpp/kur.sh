@@ -11,6 +11,24 @@ GPU=${GPU:-hip}
 GPU_TARGET=${GPU_TARGET:-gfx1201}
 COMMIT=$(cat "$HERE/LLAMA_CPP_COMMIT")
 
+# araç kontrolü (eksikse ne kurulacağını söyle)
+need() { command -v "$1" >/dev/null || { echo "EKSİK: $1 -> $2"; exit 1; }; }
+need git   "sudo apt install git"
+need cmake "sudo apt install cmake build-essential"
+need g++   "sudo apt install build-essential"
+if [ "$GPU" = hip ]; then
+  for d in /opt/rocm/bin /opt/rocm-*/bin; do [ -x "$d/hipconfig" ] && export PATH="$d:$PATH" && break; done
+  if ! command -v hipconfig >/dev/null; then
+    echo "ROCm geliştirme araçları (hipconfig/hipcc) yok. İki seçenek:"
+    echo "  1) Vulkan ile derle (en kolayı): sudo apt install libvulkan-dev glslc && GPU=vulkan bash llamacpp/kur.sh"
+    echo "  2) ROCm HIP SDK kur (amdgpu-install deposu ekliyse): sudo apt install rocm-hip-sdk"
+    exit 1
+  fi
+fi
+if [ "$GPU" = vulkan ]; then
+  need glslc "sudo apt install glslc libvulkan-dev"
+fi
+
 if [ ! -d "$DIR/.git" ]; then
   git clone --filter=blob:none https://github.com/ggml-org/llama.cpp "$DIR"
 fi

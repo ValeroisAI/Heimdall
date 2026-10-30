@@ -250,7 +250,12 @@ class HybridAttention(nn.Module):
         beta = torch.sigmoid(bb) * (pos >= self.sinks).float()[None, :, None]     # çapa tokenler yazılmaz
         return qm, km, g, beta
 
-    def _window(self, qr, ext_k, ext_v, ext_pos, sink_k, sink_v, pos):
+    def _window(self, *a):
+        """Pencere + çapa dikkati her zaman fp32 (bf16 autocast skorları yuvarlar: pencere içi öğretmenle birebir olsun)."""
+        with torch.autocast(a[0].device.type, enabled=False):
+            return self._window_fp32(*a)
+
+    def _window_fp32(self, qr, ext_k, ext_v, ext_pos, sink_k, sink_v, pos):
         """Pencere + çapa dikkati, W'lik sorgu blokları (bellek O(t·W)). ext_*: [halka (W) ; yeni tokenler]."""
         b, h, t, dh = qr.shape
         hkv, w, s = ext_k.size(1), self.window, self.sinks

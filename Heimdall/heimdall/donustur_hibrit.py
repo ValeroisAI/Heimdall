@@ -109,10 +109,53 @@ def conversion_for(m, out: Path):
     raise SystemExit(f"dönüşüm bulunamadı: {f} (ya da dönüşüm içeren bir .gguf)")
 
 
-def calib_ids(path, vocab: int, n: int, t: int, seed: int) -> torch.Tensor:
+# Sentetik hatırlama dizileri: doğal metnin başına "bilgi", sonuna (pencereden uzak) "soru + cevap" yazılır.
+# Öğretmen cevabı üretirken uzaktaki bilgiye bakar; öğrencinin bunu ancak hafızasıyla yapabileceği konumlar oluşur.
+# Parola testindeki kalıp ("The pass key is ...") bilerek kullanılmaz.
+_NAMES = ("Alice", "Mehmet", "Yuki", "Omar", "Elena", "Kofi", "Ingrid", "Ravi", "Lucia", "Tariq", "Nadia", "Bjorn",
+          "Chen", "Amara", "Diego", "Freya", "Hassan", "Ivana", "Jonas", "Leila", "Marco", "Noor", "Pavel", "Selin",
+          "Tomas", "Zeynep", "Arjun", "Clara", "Emre", "Hana", "Kenji", "Mira", "Oscar", "Priya", "Sven", "Aylin")
+_PLACES = ("Lisbon", "Kyoto", "Ankara", "Nairobi", "Oslo", "Lima", "Hanoi", "Dublin", "Tbilisi", "Quito", "Riga", "Cairo")
+_TEMPLATES = (
+    ("The secret code of {k} is {v}.", "What is the secret code of {k}? The secret code of {k} is {v}."),
+    ("{k}'s locker number is {v}.", "Which locker belongs to {k}? {k}'s locker number is {v}."),
+    ("Note: {k} was born in {v}.", "When was {k} born? {k} was born in {v}."),
+    ("{k} lives in {p}, in apartment {v}.", "Where does {k} live? {k} lives in {p}, in apartment {v}."),
+    ("The order for {k} has tracking number {v}.", "The tracking number of {k}'s order is {v}."),
+)
+
+
+def recall_sequence(tok, data, t: int, rng, n_facts: int = 12) -> np.ndarray:
+    s = int(rng.integers(0, len(data) - t - 1))
+    seq = np.array(data[s:s + t], dtype=np.int64)
+    facts = []
+    for _ in range(n_facts):
+        k = f"{rng.choice(_NAMES)} {rng.choice(_NAMES)}son"
+        v, p = str(int(rng.integers(100, 99999))), str(rng.choice(_PLACES))
+        a, q = _TEMPLATES[int(rng.integers(len(_TEMPLATES)))]
+        facts.append((tok.encode(" " + a.format(k=k, v=v, p=p)).ids, tok.encode(" " + q.format(k=k, v=v, p=p)).ids))
+    early, late = int(0.3 * t), int(0.7 * t)
+
+    def place(lo, hi, pieces):
+        span = max(len(x) for x in pieces) + 2
+        slots = np.sort(rng.choice(np.arange(lo, max(lo + 1, hi - span), span), size=len(pieces), replace=False))
+        for st_, x in zip(slots, pieces):
+            seq[st_:st_ + len(x)] = x
+    place(4, early, [f for f, _ in facts])
+    order = rng.permutation(n_facts)
+    place(late, t - 2, [facts[i][1] for i in order])
+    return seq
+
+
+def calib_ids(path, vocab: int, n: int, t: int, seed: int, tok=None, synth: float = 0.0) -> torch.Tensor:
     data = np.memmap(path, dtype=np.uint32 if vocab >= 65536 else np.uint16, mode="r")
-    starts = np.random.default_rng(seed).integers(0, len(data) - t - 1, n)
-    return torch.from_numpy(np.stack([data[s:s + t] for s in starts]).astype(np.int64))
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, len(data) - t - 1, n)
+    out = np.stack([data[s:s + t] for s in starts]).astype(np.int64)
+    n_syn = int(round(synth * n)) if tok is not None else 0
+    for j in range(n_syn):                     # karışık sıra: doğrulama dilimine de sentetik düşer
+        out[(j * n) // max(n_syn, 1)] = recall_sequence(tok, data, t, rng)
+    return torch.from_numpy(out)
 
 
 def rel_mse(ys, yt):
@@ -191,7 +234,8 @@ def cmd_asama_a(args) -> None:
     w = Weights(path)
     c = HybridConfig(w.config)
     log(plan_text(c, args.window))
-    ids = calib_ids(args.train, c.vocab, args.kalib, args.seq_len, args.seed)
+    ids = calib_ids(args.train, c.vocab, args.kalib, args.seq_len, args.seed,
+                    load_tokenizer(args.model) if args.sentetik > 0 else None, args.sentetik)
     emb = w.get("embed_tokens.weight").to(dtype)                           # CPU
     h_dev = dev if (gpu and not args.h_cpu) else torch.device("cpu")
     H = emb[ids].to(h_dev)
@@ -584,6 +628,8 @@ def main(argv=None) -> None:
     s.add_argument("--batch", type=int, default=1)
     s.add_argument("--lr", type=float, default=3e-3)
     s.add_argument("--topk", type=int, default=32)
+    s.add_argument("--sentetik", type=float, default=0.0,
+                   help="kalibrasyon dizilerinin bu oranı sentetik hatırlama dizisi (uzaktaki bilgiyi geri getirme)")
     s.add_argument("--h-cpu", action="store_true", help="gizli durumları CPU RAM'de tut (GPU belleği azsa)")
     s.add_argument("--no-mtp", action="store_true")
     s.set_defaults(fn=cmd_asama_a)
