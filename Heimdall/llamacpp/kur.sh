@@ -20,13 +20,14 @@ if [ "$GPU" = hip ]; then
   for d in /opt/rocm/bin /opt/rocm-*/bin; do [ -x "$d/hipconfig" ] && export PATH="$d:$PATH" && break; done
   if ! command -v hipconfig >/dev/null; then
     echo "ROCm geliştirme araçları (hipconfig/hipcc) yok. İki seçenek:"
-    echo "  1) Vulkan ile derle (en kolayı): sudo apt install libvulkan-dev glslc && GPU=vulkan bash llamacpp/kur.sh"
+    echo "  1) Vulkan ile derle (en kolayı): sudo apt install libvulkan-dev glslc spirv-headers glslang-tools && GPU=vulkan bash llamacpp/kur.sh"
     echo "  2) ROCm HIP SDK kur (amdgpu-install deposu ekliyse): sudo apt install rocm-hip-sdk"
     exit 1
   fi
 fi
 if [ "$GPU" = vulkan ]; then
-  need glslc "sudo apt install glslc libvulkan-dev"
+  need glslc "sudo apt install glslc libvulkan-dev spirv-headers glslang-tools"
+  [ -d /usr/share/cmake/SPIRV-Headers ] || [ -d /usr/lib/cmake/SPIRV-Headers ] || ls /usr/share/*/cmake/SPIRV-Headers* >/dev/null 2>&1 || { echo "EKSİK: SPIRV-Headers -> sudo apt install spirv-headers"; exit 1; }
 fi
 
 if [ ! -d "$DIR/.git" ]; then
