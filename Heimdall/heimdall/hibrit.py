@@ -32,6 +32,7 @@ from .donustur import Q4Linear
 from .kernels import causal_conv, delta_rule, delta_rule_step, rope
 
 ATTN, LINEAR = "full_attention", "linear_attention"
+Q4_CACHE_VERSION = 2   # 4-bit önbellek biçimi; değişince eski dosyalar yeniden üretilir
 
 
 class HybridConfig:
@@ -507,9 +508,18 @@ class HybridLM(nn.Module):
         c = HybridConfig(w.config)
         with torch.device("meta"):
             m = cls(c, mtp=mtp and w.has("mtp.fc.weight"))
+        tied = c.tie and not w.has("lm_head.weight")
+        # paylaşılan embedding: embedding başka cihazdaysa (CPU) ya da 4-bit istenirse lm_head ayrı kopya olur
+        own_head = tied and (q4_group > 0 or (embed_device is not None and torch.device(embed_device) != torch.device(device)))
+        cache_ok = False
         if q4_cache is not None and Path(q4_cache).exists():
-            q4_skeleton(m, q4_group, device)
             sd = torch.load(q4_cache, map_location="cpu", weights_only=True, mmap=True)
+            cache_ok = sd.pop("__q4_surum__", None) is not None and torch.equal(sd.pop("__q4_surum__t", torch.tensor(0)),
+                                                                              torch.tensor(Q4_CACHE_VERSION))
+            if not cache_ok:
+                print(f"eski/uyumsuz 4-bit önbellek yok sayıldı, yeniden oluşturuluyor: {q4_cache}")
+        if cache_ok:
+            q4_skeleton(m, q4_group, device)
             m.load_state_dict(sd, strict=False, assign=True)
             m.embed_tokens.to(embed_device or device)
             for n, p in list(m.named_parameters()) + list(m.named_buffers()):
@@ -517,9 +527,17 @@ class HybridLM(nn.Module):
                     p.data = p.data.to(device)
         else:
             materialize(m, "", w, device, dtype, q4_group, embed_device)
+            if own_head:
+                t = m.embed_tokens.weight.data.to(device)
+                m.lm_head = (Q4Linear(t, q4_group, bits=4) if q4_eligible(m.lm_head, q4_group) else
+                             nn.Linear(c.d, c.vocab, bias=False, device=device, dtype=dtype))
+                if isinstance(m.lm_head, nn.Linear):
+                    m.lm_head.weight.data.copy_(t)
             if q4_cache is not None:
-                torch.save({k: v for k, v in m.state_dict().items()}, q4_cache)
-        if c.tie and not w.has("lm_head.weight"):
+                sd = dict(m.state_dict())
+                sd["__q4_surum__"], sd["__q4_surum__t"] = torch.tensor(1), torch.tensor(Q4_CACHE_VERSION)
+                torch.save(sd, q4_cache)
+        if tied and not own_head:
             m.lm_head.weight = m.embed_tokens.weight
         meta = [n for n, t in list(m.named_parameters()) + list(m.named_buffers()) if t.is_meta]
         assert not meta, f"eksik ağırlıklar: {meta[:5]}"

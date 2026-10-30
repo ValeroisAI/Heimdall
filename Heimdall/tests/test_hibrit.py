@@ -162,3 +162,25 @@ def test_exact_within_window(tiny_dir):
         t = m(ids)
     assert (s[:, :16] - t[:, :16]).abs().max() < 1e-4
     assert (s[:, 16:] - t[:, 16:]).abs().max() > 1e-3
+
+
+def test_tied_head_q4_cache(tmp_path):
+    """Paylaşılan embedding (Qwen3.5-0.8B gibi) + 4-bit + önbellek: lm_head ayrı 4-bit kopya, önbellekten aynı sonuç."""
+    from safetensors.torch import save_file
+    text = dict(TEXT, tie_word_embeddings=True)
+    torch.manual_seed(1)
+    m = HybridLM(HybridConfig(text))
+    _noise(m)
+    sd = {("mtp." + k[4:] if k.startswith("mtp.") else "model.language_model." + k): v.contiguous()
+          for k, v in m.state_dict().items() if k != "lm_head.weight"}
+    sd = {k.replace("model.language_model.mtp.", "mtp."): v for k, v in sd.items()}
+    save_file(sd, str(tmp_path / "model.safetensors"))
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "text_config": text}))
+    full = HybridLM.load(tmp_path).eval()
+    a = HybridLM.load(tmp_path, q4_group=32, q4_cache=tmp_path / "q4.pt").eval()
+    b = HybridLM.load(tmp_path, q4_group=32, q4_cache=tmp_path / "q4.pt").eval()
+    ids = torch.randint(0, 300, (1, 20))
+    with torch.no_grad():
+        x, y, z = full(ids), a(ids), b(ids)
+    assert (y - z).abs().max() < 1e-6
+    assert (x.argmax(-1) == y.argmax(-1)).float().mean() > 0.7
