@@ -498,7 +498,12 @@ class HybridLM(nn.Module):
     @classmethod
     def load(cls, path, device="cpu", dtype=torch.float32, q4_group: int = 0, embed_device=None,
              mtp: bool = True, q4_cache=None) -> "HybridLM":
-        w = Weights(path)
+        gguf = str(path).endswith(".gguf")
+        if gguf:
+            from .gguf_cevir import GGUFWeights
+            w = GGUFWeights(path)
+        else:
+            w = Weights(path)
         c = HybridConfig(w.config)
         with torch.device("meta"):
             m = cls(c, mtp=mtp and w.has("mtp.fc.weight"))
@@ -520,6 +525,7 @@ class HybridLM(nn.Module):
         assert not meta, f"eksik ağırlıklar: {meta[:5]}"
         for p in m.parameters():
             p.requires_grad_(False)
+        m.embedded_conversion = w.conversion_state() if gguf else None   # GGUF dönüşümü kendi içinde taşır
         return m
 
     @property

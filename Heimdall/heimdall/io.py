@@ -36,7 +36,10 @@ def save_bundle(model: HeimdallLM, out_dir, tokenizer: Optional[str] = None, met
 def load_model(path, device="cpu", dtype: Optional[torch.dtype] = None) -> HeimdallLM:
     """Servis paketi klasörü ya da eğitim checkpoint'i (.pt) yükler."""
     p = Path(path)
-    if p.is_dir():
+    if p.suffix == ".gguf":
+        from .gguf_cevir import load_heimdall_gguf
+        model = load_heimdall_gguf(p)
+    elif p.is_dir():
         model = HeimdallLM(HeimdallConfig(**json.loads((p / "config.json").read_text())))
         if (p / "model.safetensors").exists():
             from safetensors.torch import load_model as st_load
@@ -57,6 +60,9 @@ def tokenizer_path(model_path, override: Optional[str] = None) -> str:
     if override:
         return override
     p = Path(model_path)
+    if p.suffix == ".gguf":
+        from .gguf_cevir import gguf_tokenizer_file
+        return gguf_tokenizer_file(p)
     if p.is_dir() and (p / "tokenizer.json").exists():
         return str(p / "tokenizer.json")
     return str(DEFAULT_TOKENIZER)

@@ -8,5 +8,7 @@ pydantic>=2
 # dönüştürme (donustur.py): Hugging Face'ten model ve wikitext indirme
 huggingface_hub
 pyarrow
+# GGUF çevirici (gguf_cevir.py)
+gguf
 # İsteğe bağlı, CUDA ve ROCm'da DeltaNet için Triton çekirdekleri (açılışta doğrulanır, uyumsuzsa devre dışı kalır):
 # flash-linear-attention

@@ -53,6 +53,14 @@ def setup(args):
     return dev, gpu, amp, (torch.bfloat16 if gpu else torch.float32)
 
 
+def eta(seconds: float) -> str:
+    """Kalan süre + tahmini bitiş saati (yerel saat)."""
+    import datetime
+    s = max(0, int(seconds))
+    end = (datetime.datetime.now() + datetime.timedelta(seconds=s)).strftime("%H:%M")
+    return f"kalan ≈ {s // 3600} sa {s % 3600 // 60:02d} dk (bitiş ~{end})"
+
+
 def gb(n: float) -> str:
     return f"{n / 2**30:.1f} GB"
 
@@ -80,6 +88,25 @@ def plan_text(c: HybridConfig, window: int, q4_group: int = 128) -> str:
             f"orijinal KV cache: token başına {kv // 1024} KB → 32K: {gb(kv * 32768)}, 128K: {gb(kv * 131072)}, "
             f"262K: {gb(kv * 262144)}\n"
             f"dönüşüm cache (her uzunlukta sabit): {gb(gdn_state + conv_state)} (pencere {window})")
+
+
+def load_tokenizer(model: str):
+    from tokenizers import Tokenizer
+    path = fetch_model(model)
+    if str(path).endswith(".gguf"):
+        from .gguf_cevir import Reader
+        return Reader(path).tokenizer()
+    return Tokenizer.from_file(str(Path(path) / "tokenizer.json"))
+
+
+def conversion_for(m, out: Path):
+    """--out içindeki donusum_param.pt; yoksa GGUF'un içindeki dönüşüm."""
+    f = out / "donusum_param.pt"
+    if f.exists():
+        return torch.load(f, map_location="cpu", weights_only=False)
+    if getattr(m, "embedded_conversion", None):
+        return m.embedded_conversion
+    raise SystemExit(f"dönüşüm bulunamadı: {f} (ya da dönüşüm içeren bir .gguf)")
 
 
 def calib_ids(path, vocab: int, n: int, t: int, seed: int) -> torch.Tensor:
@@ -130,7 +157,9 @@ def train_attention(name, layer, H, args, dev, amp, gpu, log):
         opt.step()
         opt.zero_grad(set_to_none=True)
         if step % 50 == 0 or step == args.steps:
-            log(f"    {name} adım {step}/{args.steps} | kayıp {loss.item():.4f} | {time.time() - t0:.0f} sn{peak(gpu)}")
+            per = (time.time() - t0) / step
+            log(f"    {name} adım {step}/{args.steps} | kayıp {loss.item():.4f} | {per:.2f} sn/adım | bu katman "
+                f"{eta(per * (args.steps - step))}{peak(gpu)}")
     v1 = val("student")
     log(f"  {name}: göreli hata (doğrulama) yalnız pencere {v_win:.4f} | eğitimsiz {v0:.4f} → eğitilmiş {v1:.4f}")
     for p in params:
@@ -171,6 +200,8 @@ def cmd_asama_a(args) -> None:
     keep = set(args.keep_global)
     report, conv, params = {}, [], {}
     t_all = time.time()
+    took = {ATTN: [], "linear_attention": []}
+    n_attn_left = c.layer_types.count(ATTN) - len(keep) + (1 if w.has("mtp.fc.weight") and not args.no_mtp else 0)
     for i, kind in enumerate(c.layer_types):
         t0 = time.time()
         with torch.device("meta"):
@@ -187,7 +218,19 @@ def cmd_asama_a(args) -> None:
         del layer
         if gpu:
             torch.cuda.empty_cache()
-        log(f"katman {i:2d} ({'dikkat ' if kind == ATTN else 'DeltaNet'}) {time.time() - t0:5.0f} sn{peak(gpu)}")
+        trained = kind == ATTN and name not in keep
+        took[ATTN if trained else "linear_attention"].append(time.time() - t0)
+        n_attn_left -= trained
+        rest = c.layer_types[i + 1:]
+        n_lin_left = len(rest) - sum(1 for j, k_ in enumerate(rest, i + 1) if k_ == ATTN and f"layers.{j}" not in keep)
+        avg = {k_: sum(v) / len(v) for k_, v in took.items() if v}
+        if ATTN in avg:   # dikkat katmanı süresi bilinene kadar tahmin yok
+            left = n_lin_left * avg.get("linear_attention", 0) + n_attn_left * avg[ATTN] + 120
+            tail = f" | toplam {eta(left)}"
+        else:
+            tail = " | toplam kalan süre ilk dikkat katmanından sonra yazılır"
+        log(f"katman {i:2d}/{c.n_layers} ({'dikkat ' if kind == ATTN else 'DeltaNet'}) {time.time() - t0:5.0f} sn"
+            f"{tail}{peak(gpu)}")
         torch.save({"conv": conv, "params": params, "mtp_hidden": "normed",
                     "meta": {"model": args.model, "rapor": report, "son_katman": i}}, out / "donusum_param.pt")
 
@@ -248,6 +291,7 @@ def load_model(args, dev, gpu, dtype, mtp: bool = True) -> HybridLM:
     path = fetch_model(args.model)
     q4 = args.q4 and gpu or args.q4_cpu
     out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
     q4c = (out / f"q4_g{args.q4_group}.pt") if q4 and not args.no_q4_cache else None
     t0 = time.time()
     m = HybridLM.load(path, device=dev, dtype=dtype, q4_group=args.q4_group if q4 else 0,
@@ -316,9 +360,10 @@ def cmd_asama_b(args) -> None:
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
-        if step % 10 == 0 or step == args.steps:
-            print(f"  adım {step}/{args.steps} | KL {loss.item():.4f} | {(time.time() - t0) / step:.1f} sn/adım{peak(gpu)}",
-                  flush=True)
+        if step % 5 == 0 or step == args.steps:
+            per = (time.time() - t0) / step
+            print(f"  adım {step}/{args.steps} | KL {loss.item():.4f} | {per:.1f} sn/adım | "
+                  f"{eta(per * (args.steps - step) + 2 * per * n_val)}{peak(gpu)}", flush=True)
     v1 = val()
     print(f"  doğrulama KL: {v0:.4f} → {v1:.4f}", flush=True)
     if not (out / "donusum_param_A.pt").exists():
@@ -334,9 +379,13 @@ def cmd_asama_b(args) -> None:
 
 # --------------------------------------------------------------------------- değerlendirme
 @torch.no_grad()
-def nll_curve(m, wins, chunk: int, amp) -> torch.Tensor:
+def nll_curve(m, wins, chunk: int, amp, label: str = "") -> torch.Tensor:
     tot = torch.zeros(wins.size(1) - 1)
-    for w in wins:
+    t0 = time.time()
+    for wi, w in enumerate(wins):
+        if wi:
+            per = (time.time() - t0) / wi
+            print(f"    {label}: pencere {wi}/{wins.size(0)} | bu satır {eta(per * (wins.size(0) - wi))}", flush=True)
         cache = m.new_cache()
         ids = w[None, :-1].to(m.device)
         tgt = w[1:]
@@ -371,11 +420,10 @@ def passkey(m, tok, length: int, depth: float, key: str, chunk: int, amp) -> boo
 
 
 def cmd_degerlendir(args) -> None:
-    from tokenizers import Tokenizer
     dev, gpu, amp, dtype = setup(args)
     out = Path(args.out)
     m = load_model(args, dev, gpu, dtype, mtp=args.mtp)
-    st = torch.load(out / "donusum_param.pt", map_location="cpu", weights_only=False)
+    st = conversion_for(m, out)
     m.apply_conversion(st)
     w = st["conv"][0]["window"]
     print(plan_text(m.c, w, args.q4_group), flush=True)
@@ -391,18 +439,18 @@ def cmd_degerlendir(args) -> None:
         for mode, label in (("teacher", "öğretmen"), ("window", "yalnız pencere"), ("student", "dönüşüm")):
             m.set_mode(mode)
             try:
-                nll = nll_curve(m, wins, args.chunk, amp)
+                nll = nll_curve(m, wins, args.chunk, amp, label)
             except torch.OutOfMemoryError:
                 print(f"{label:16s} BELLEK YETMEDİ (KV cache)")
                 torch.cuda.empty_cache()
                 continue
-            row = {f"{a}-{b}": math.exp(nll[a:b].mean()) for a, b in bk}
+            row = {f"{a}-{b}": math.exp(nll[a:b].mean()) for a, b in bk}  # noqa: E501
             row["tumu"] = math.exp(nll.mean())
             res[mode] = row
             print(f"{label:16s}" + "".join(f"{v:13.2f}" for v in row.values()), flush=True)
         m.set_mode("student")
     if args.sifre:
-        tok = Tokenizer.from_file(str(Path(fetch_model(args.model)) / "tokenizer.json"))
+        tok = load_tokenizer(args.model)
         rng = np.random.default_rng(1)
         print("\nparola (passkey) testi: derinlik 10/50/90%, uzunluk başına "
               f"{args.deneme} deneme", flush=True)
@@ -413,8 +461,13 @@ def cmd_degerlendir(args) -> None:
                     torch.cuda.reset_peak_memory_stats()
                 try:
                     m.set_mode(mode)
+                    t0 = time.time()
                     for _ in range(args.deneme):
                         for d in (0.1, 0.5, 0.9):
+                            if tried:
+                                per = (time.time() - t0) / tried
+                                print(f"    {label} {length}: deneme {tried}/{3 * args.deneme} | "
+                                      f"{eta(per * (3 * args.deneme - tried))}", flush=True)
                             ok += passkey(m, tok, length, d, str(int(rng.integers(10000, 99999))), args.chunk, amp)
                             tried += 1
                     print(f"  {label:9s} {length:7d} token: {ok}/{tried}{peak(gpu)}", flush=True)
@@ -429,13 +482,12 @@ def cmd_degerlendir(args) -> None:
 
 # --------------------------------------------------------------------------- sohbet
 def cmd_sohbet(args) -> None:
-    from tokenizers import Tokenizer
     dev, gpu, amp, dtype = setup(args)
     out = Path(args.out)
     m = load_model(args, dev, gpu, dtype, mtp=args.mtp)
     if not args.ogretmen:
-        m.apply_conversion(torch.load(out / "donusum_param.pt", map_location="cpu", weights_only=False))
-    tok = Tokenizer.from_file(str(Path(fetch_model(args.model)) / "tokenizer.json"))
+        m.apply_conversion(conversion_for(m, out))
+    tok = load_tokenizer(args.model)
     im_end = tok.token_to_id("<|im_end|>")
     stop = {t for t in (im_end, tok.token_to_id("<|endoftext|>"), m.c.eos) if t is not None}
     cache, first = m.new_cache(), True

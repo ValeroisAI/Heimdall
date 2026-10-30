@@ -162,6 +162,17 @@ Verified (CPU, `tests/test_hibrit.py`):
 
 ---
 
+### GGUF export (`heimdall/gguf_cevir.py`)
+Writes a single-file GGUF (config + tokenizer inside) and loads it back:
+* **Heimdall** checkpoints (`heimdall` mode): 1-bit / ternary FFN weights are stored as **TQ2_0**. The row scale goes into the block scale, so the bit pattern is reproduced exactly and the scale is rounded to fp16. Other matrices are bf16/f16/q8_0.
+* **Bifrost-converted Qwen3.5 / 3.8** (`bifrost` mode): original weights plus conversion parameters. q8_0 on Qwen3.5-0.8B on real text: argmax agreement 0.98–1.00, NLL 3.4118 → 3.4074.
+
+`--model x.gguf` works in `donustur_hibrit` (chat, eval) and `io.load_model`. Types are limited to what `gguf-py` can write (f32, bf16, f16, q8_0, q5_0, q4_0); K-quants and IQ types are not available. **llama.cpp / LM Studio / Ollama cannot run these files yet**: the architectures (`heimdall`, `bifrost_qwen35`) are not registered in llama.cpp. Running them there needs a llama.cpp port of our layers, after which `llama-quantize` can produce Q4_K_M / IQ4_XS from the q8_0/bf16 file.
+```bash
+python -m heimdall.gguf_cevir heimdall --ckpt runs/hafta/model/last.pt --out heimdall-337m.gguf
+python -m heimdall.gguf_cevir dogrula  --gguf heimdall-337m.gguf --ckpt runs/hafta/model/last.pt
+```
+
 ### Will it fit? Planner and local UI (`planla.py`, `arayuz.py`)
 ```bash
 python -m heimdall.planla --model Qwen/Qwen3-8B --gpu 16 --ram 32 --q4 --grad-ckpt   # reads only config.json, no weights
