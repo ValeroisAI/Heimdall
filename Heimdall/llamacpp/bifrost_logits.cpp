@@ -1,6 +1,7 @@
 // bifrost_logits: verilen tokenleri parça parça (prefill + tek token) işler, her konumun logitlerini ikili dosyaya yazar.
 //   bifrost_logits model.gguf tokens.bin out.bin "5,1,13,1,1,9,30"   (parça boyutları; kalan tokenler tek tek)
 // tokens.bin: int32 dizisi. out.bin: float32 [n_tokens, n_vocab].
+// Ortam: NGL = GPU'ya konacak katman sayısı (varsayılan 0 = CPU), N_CTX = bağlam boyu (varsayılan token sayısı + 16).
 #include "llama.h"
 #include <cstdio>
 #include <cstdlib>
@@ -15,11 +16,11 @@ int main(int argc, char ** argv) {
     std::vector<llama_token> toks; int32_t t; while (fread(&t, 4, 1, f) == 1) toks.push_back(t); fclose(f);
 
     llama_backend_init();
-    auto mp = llama_model_default_params(); mp.n_gpu_layers = 0;
+    auto mp = llama_model_default_params(); mp.n_gpu_layers = getenv("NGL") ? atoi(getenv("NGL")) : 0;
     llama_model * model = llama_model_load_from_file(argv[1], mp);
     if (!model) { fprintf(stderr, "model yüklenemedi\n"); return 1; }
     auto cp = llama_context_default_params();
-    cp.n_ctx = toks.size() + 16; cp.n_batch = 512; cp.n_ubatch = 512; cp.n_seq_max = 1;
+    cp.n_ctx = getenv("N_CTX") ? atoi(getenv("N_CTX")) : toks.size() + 16; cp.n_batch = 512; cp.n_ubatch = 512; cp.n_seq_max = 1;
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "bağlam kurulamadı\n"); return 1; }
     const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));

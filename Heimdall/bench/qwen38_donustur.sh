@@ -12,6 +12,13 @@
 #   ADIM=gguf    bash bench/qwen38_donustur.sh   # tek dosya .gguf (q8_0, ~29 GB; şimdilik yalnız bizim çalışma zamanımızda açılır)
 #   ADIM=gece    bash bench/qwen38_donustur.sh   # gece boyu: a → test → b → test (log: $OUT/gece.log)
 #
+#   llama.cpp (Bifrost yamalı, GPU'da hızlı çıkarım):
+#   ADIM=llama        bash bench/qwen38_donustur.sh   # kurulum + derleme (~10-20 dk)
+#   ADIM=llamaprova   bash bench/qwen38_donustur.sh   # 0.8B prova: llama.cpp GPU ↔ PyTorch birebir mi
+#   ADIM=llamagguf    bash bench/qwen38_donustur.sh   # 27B: q8_0 GGUF (~29 GB) → $QUANT (~14 GB)
+#   ADIM=llamasohbet  bash bench/qwen38_donustur.sh   # llama-cli ile sohbet (bağlam $CTX)
+#   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
+#
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
 #        KEEP="layers.63": o tam dikkat katmanı dönüştürülmez (birebir uzun-menzil hatırlama korunur;
 #        cache token başına 4 KB büyür = orijinalin 1/16'sı, 262K'da 1 GB)
@@ -30,6 +37,11 @@ SEQ=${SEQ:-4096}
 ADIMA=${ADIMA:-400}
 ADIMB=${ADIMB:-200}
 KEEP=${KEEP:-}
+LLAMA=${LLAMA:-$HOME/llama.cpp-bifrost}
+QUANT=${QUANT:-IQ4_XS}
+CTX=${CTX:-131072}
+GGUF_TIP=${GGUF_TIP:-q8_0}   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
+hf_dir() { $PY -c "from heimdall.donustur import fetch_model; print(fetch_model('$1'))"; }
 H="$PY -m heimdall.donustur_hibrit"
 
 if [[ $ADIM == prova ]]; then
@@ -54,8 +66,25 @@ case $ADIM in
   sohbet) $H sohbet --model $MODEL --out $OUT --mtp ;;
   gguf)   $PY -m heimdall.gguf_cevir bifrost --model $MODEL --conv $OUT/donusum_param.pt --out $OUT/q38-27b-bifrost-q8_0.gguf \
             --tip q8_0 ;;
+  llama)  DIR=$LLAMA bash llamacpp/kur.sh ;;
+  llamaprova)
+          M=$(hf_dir Qwen/Qwen3.5-0.8B); O=runs/q35_08b_prova
+          $PY llamacpp/bifrost_gguf.py --model "$M" --conv $O/donusum_param.pt --llama $LLAMA --outtype f32 \
+            --out $O/q35-08b-bifrost-f32.gguf
+          NGL=99 $PY llamacpp/karsilastir.py --gguf $O/q35-08b-bifrost-f32.gguf --model "$M" --conv $O/donusum_param.pt \
+            --bin $LLAMA/build/bin --n 400 --parcalar 200,1,1 ;;
+  llamagguf)
+          $PY llamacpp/bifrost_gguf.py --model "$(hf_dir $MODEL)" --conv $OUT/donusum_param.pt --llama $LLAMA \
+            --outtype $GGUF_TIP --out $OUT/q38-27b-bifrost-$GGUF_TIP.gguf
+          $LLAMA/build/bin/llama-quantize $([ $GGUF_TIP = q8_0 ] && echo --allow-requantize) \
+            $OUT/q38-27b-bifrost-$GGUF_TIP.gguf $OUT/q38-27b-bifrost-$QUANT.gguf $QUANT
+          echo "hazır: $OUT/q38-27b-bifrost-$QUANT.gguf ($GGUF_TIP ara dosyası silinebilir)" ;;
+  llamasohbet)
+          $LLAMA/build/bin/llama-cli -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -c $CTX ;;
+  llamabench)
+          $LLAMA/build/bin/llama-bench -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -p 512 -n 64 -d 0,32768 ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench)"; exit 1 ;;
 esac

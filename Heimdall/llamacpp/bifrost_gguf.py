@@ -59,7 +59,8 @@ def main() -> None:
     sys.path.insert(0, str(Path(a.llama) / "gguf-py"))
     import gguf
 
-    with tempfile.TemporaryDirectory() as tmp:
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=Path(a.out).parent) as tmp:   # /tmp küçük olabilir: taban GGUF çıktının yanında
         base = a.base
         if base is None:
             assert a.model, "--model ya da --base gerekli"
