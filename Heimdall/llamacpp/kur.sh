@@ -27,7 +27,7 @@ if [ "$GPU" = hip ]; then
 fi
 if [ "$GPU" = vulkan ]; then
   need glslc "sudo apt install glslc libvulkan-dev spirv-headers glslang-tools"
-  [ -d /usr/share/cmake/SPIRV-Headers ] || [ -d /usr/lib/cmake/SPIRV-Headers ] || ls /usr/share/*/cmake/SPIRV-Headers* >/dev/null 2>&1 || { echo "EKSİK: SPIRV-Headers -> sudo apt install spirv-headers"; exit 1; }
+  [ -d /usr/share/cmake/SPIRV-Headers ] || [ -d /usr/lib/cmake/SPIRV-Headers ] || ls -d /usr/lib/*/cmake/SPIRV-Headers* /usr/share/*/cmake/SPIRV-Headers* >/dev/null 2>&1 || echo "uyarı: SPIRV-Headers bulunamadı (cmake hata verirse: sudo apt install spirv-headers)"
 fi
 
 if [ ! -d "$DIR/.git" ]; then
