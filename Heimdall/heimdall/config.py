@@ -47,6 +47,10 @@ class HeimdallConfig:
     bits: int = 0
     bit_scope: str = "all"         # hangi matrisler bit: "all" | "ffn" (yalnız SwiGLU) | "mix" (yalnız karıştırıcı)
     bit_rank: int = 0              # >0: her BitLinear'a yoğun düşük-rank düzeltici (U·V, bit ağırlıkların yanında)
+    # MTP (çok-token tahmini, DeepSeek-V3 / Qwen3.5 tarzı): k. modül x_{i+k+1}'i tahmin eder. Ek kayıp yalnız eğitimde;
+    # doğrulama kaybı ana tahmindir (karşılaştırılabilir). Modüller DeltaNet bloğudur (sabit bellek, taslak üretimi için).
+    mtp_depth: int = 0
+    mtp_weight: float = 0.3
 
     def __post_init__(self) -> None:
         assert self.layout and set(self.layout) <= {"D", "A"}, "layout yalnız D ve A içerebilir"
@@ -57,6 +61,7 @@ class HeimdallConfig:
         assert self.bit_scope in ("all", "ffn", "mix") and self.bit_rank >= 0
         assert not (self.bits and self.moe_experts), "bits ile MoE henüz birlikte desteklenmiyor"
         assert self.attn_rope in ("auto", "rope", "none") and self.kernel in ("auto", "torch")
+        assert self.mtp_depth >= 0 and self.mtp_weight >= 0
 
     @property
     def kinds(self) -> list:

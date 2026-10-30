@@ -100,6 +100,17 @@ class Q4Linear(nn.Module):
         self.in_features, self.out_features, self.group = in_f, out_f, group
         self.bias = None
 
+    @classmethod
+    def empty(cls, out_f: int, in_f: int, group: int = 32, bits: int = 4, device=None) -> "Q4Linear":
+        """Boş iskelet (kayıtlı nicemlenmiş ağırlıklar load_state_dict ile doldurulur; yeniden nicemleme yok)."""
+        m = cls.__new__(cls)
+        nn.Module.__init__(m)
+        m.bits, m.in_features, m.out_features, m.group, m.bias = bits, in_f, out_f, group, None
+        m.register_buffer("packed", torch.empty(out_f, in_f // 2 if bits == 4 else in_f, dtype=torch.uint8, device=device))
+        m.register_buffer("scale", torch.empty(out_f, in_f // group, dtype=torch.half, device=device))
+        m.register_buffer("zero", torch.empty(out_f, in_f // group, dtype=torch.half, device=device))
+        return m
+
     def dequant(self, dtype) -> torch.Tensor:
         q = torch.stack((self.packed & 15, self.packed >> 4), -1) if self.bits == 4 else self.packed
         q = q.view(self.out_features, -1, self.group).to(dtype)
@@ -107,7 +118,25 @@ class Q4Linear(nn.Module):
             self.out_features, self.in_features)
 
     def forward(self, x):
-        return F.linear(x, self.dequant(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
+        if torch.is_autocast_enabled(x.device.type):
+            x = x.to(torch.get_autocast_dtype(x.device.type))
+        with torch.autocast(x.device.type, enabled=False):
+            y = _DequantMM.apply(x, self)
+        return y if self.bias is None else y + self.bias.to(y.dtype)
+
+
+class _DequantMM(torch.autograd.Function):
+    """x · Wᵀ, W = Q4Linear. Açılmış ağırlık geri yayılım için SAKLANMAZ, gerektiğinde yeniden açılır
+    (27B öğretmende katman başına ~0.5 GB tasarruf). Ağırlığa gradyan yok (donuk öğretmen)."""
+
+    @staticmethod
+    def forward(ctx, x, mod):
+        ctx.mod = mod
+        return F.linear(x, mod.dequant(x.dtype))
+
+    @staticmethod
+    def backward(ctx, g):
+        return g @ ctx.mod.dequant(g.dtype), None
 
 
 class _TernaryMM(torch.autograd.Function):

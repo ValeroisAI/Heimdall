@@ -51,6 +51,8 @@ def parse_args(argv=None):
     p.add_argument("--bit-kernel", choices=["off", "int8"], default="off",
                    help="--bits: Triton int8 GEMM (eğitim/prefill). Önce bench/bitkernel.py ile hızı ölç")
     p.add_argument("--flip-orani", type=float, default=5e-3, help="--bits: adım başına çevrilen ağırlık oranı (tepe)")
+    p.add_argument("--mtp-depth", type=int, help="MTP modül sayısı (0 kapalı; 1-2 önerilir, küçük modelde önce kısa deney)")
+    p.add_argument("--mtp-weight", type=float, help="MTP ek kaybının ağırlığı (varsayılan 0.3)")
     p.add_argument("--lr-muon", type=float)
     p.add_argument("--lr-adam", type=float)
     p.add_argument("--adamw-only", action="store_true")
@@ -77,7 +79,8 @@ def build_config(args) -> HeimdallConfig:
     cfg = apply_arch(PRESETS[args.preset].model, args.arch)
     over = {k: v for k, v in dict(d_model=args.d_model, n_layers=args.n_layers, layout=args.layout,
                                   attn_window=args.attn_window, kernel=args.kernel, bits=args.bits,
-                                  bit_scope=args.bit_scope, bit_rank=args.bit_rank).items() if v is not None}
+                                  bit_scope=args.bit_scope, bit_rank=args.bit_rank, mtp_depth=args.mtp_depth,
+                                  mtp_weight=args.mtp_weight).items() if v is not None}
     return replace(cfg, **over)
 
 

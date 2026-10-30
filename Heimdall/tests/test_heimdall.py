@@ -130,3 +130,25 @@ if __name__ == "__main__":
     for fn in [v for k, v in dict(globals()).items() if k.startswith("test_")]:
         fn()
         print("OK ", fn.__name__)
+
+
+def test_mtp_loss_train_only():
+    """MTP: eğitimde ek kayıp, değerlendirmede ana kayıp aynı; gradyan MTP modüllerine akar."""
+    from heimdall.config import HeimdallConfig
+    from heimdall.model import HeimdallLM
+    torch.manual_seed(0)
+    base = HeimdallConfig(vocab_size=128, d_model=64, n_layers=4, n_heads=2, head_dim=32, archival_heads=1,
+                          attn_heads=4, attn_kv_heads=2, attn_head_dim=16, kernel="torch")
+    m0 = HeimdallLM(base)
+    from dataclasses import replace
+    m2 = HeimdallLM(replace(base, mtp_depth=2))
+    m2.load_state_dict(m0.state_dict(), strict=False)
+    x = torch.randint(0, 128, (2, 33))
+    m0.eval(), m2.eval()
+    with torch.no_grad():
+        assert abs(m0(x[:, :-1], x[:, 1:]).item() - m2(x[:, :-1], x[:, 1:]).item()) < 1e-5
+    m2.train()
+    loss = m2(x[:, :-1], x[:, 1:])
+    loss.backward()
+    assert all(p.grad is not None for p in m2.mtp.parameters() if p.requires_grad)
+    assert len(m2.mtp) == 2

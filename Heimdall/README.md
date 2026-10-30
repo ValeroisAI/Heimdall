@@ -110,6 +110,8 @@ python -m heimdall.train --resume runs/bit98/last.pt
 
 Stack: bf16, `torch.compile`, **Muon** (hidden dense matrices; fused qkv/w12 orthogonalized per part) + AdamW (embeddings, norms, gates) + `BitFlip`, WSD learning-rate schedule, gradient accumulation/clipping, background data loader, automatic non-finite-loss guard (stops without overwriting the last good checkpoint). Training sequence length is 2048; there is no length curriculum. On OOM lower `--micro-batch` or use `--grad-ckpt`.
 
+**Multi-token prediction** (`--mtp-depth 1|2`, `--mtp-weight 0.3`) works in the DeepSeek-V3 / Qwen3.5 style. Module k takes the hidden state at i and the embedding of x_{i+k}, and predicts x_{i+k+1} with the shared head. Modules are DeltaNet blocks, so they stay constant-memory and can later serve as drafts. The extra loss applies only in training, so validation loss stays comparable with runs that do not use MTP. Literature caution: Gloeckle et al. (2024) found MTP *hurts* small models, while DeepSeek-V3 and Qwen use depth 1. Test 0/1/2 on `kucuk` before using it on a long run. Not measured here yet.
+
 Data format: uint16 token files (`.bin`), mixtures as `path[:weight]`. Tokenizer: `04_TOKENIZERLAR/valerois_tokenizer_8k.json` (8192 tokens). `python -m heimdall.hazirla --repo <HF dataset> --dosya <parquet files> --kolon text --out veri/x.bin` downloads and tokenizes Hugging Face parquet data.
 
 ### Overnight run (98 M, `--arch bit --bits 1`, `bench/gece.sh`)
@@ -133,6 +135,31 @@ python -m heimdall.bifrost_eval sifre  --model ... --conv ... --lengths 4000 160
 ```
 Result (SmolLM2-135M, window 64, GPU, 0.8 M training tokens): WikiText ppl 14.09 (original) → 25.76 (window only) → **17.61** (converted). Per bucket (tokens 1024–2048): 12.59 / 26.69 / 17.27. `--q4` keeps the frozen teacher in 4/8-bit (Qwen3-0.6B: ppl 13.88 bf16 → 14.90 mixed 4/8-bit at 318 MB → 16.26 all 4-bit); weights are streamed tensor by tensor. Verified in tests: teacher logits equal `transformers` exactly, token-by-token generation equals the parallel forward, and converted-layer cache size is independent of context length. **BitNet b1.58 teachers** (`microsoft/bitnet-b1.58-2B-4T-bf16`: ternary weights, 8-bit activations, relu², sub-norms) are supported: per-layer outputs match `transformers` to ~1e-5, and on real text the full-model NLL differs by 0.004 nats (3.8335 vs 3.8299), the same as the model's own sensitivity to 1e-6 input noise (activation rounding is discontinuous). Run: `bash bench/bitnet_donustur.sh`; conversion results are not yet measured. Long-context retrieval (`sifre`) of converted models is untested at sizes where it is meaningful (≥ 1.7 B).
 
+### Already-hybrid teachers: Qwen3.5 / 3.6 / 3.8 dense (`heimdall/hibrit.py`, `heimdall/donustur_hibrit.py`)
+
+Qwen3.8-27B is already built like Heimdall: 64 layers = 16 × [3 Gated DeltaNet + 1 gated full attention]. Its DeltaNet layers use the same equations as ours (L2-normalised q/k, `α = exp(−e^A·softplus(·))`, `β = σ(·)`, gated RMSNorm output). The differences are 16 QK heads shared by 48 V heads, separate depthwise convs, and no archival heads. Only the **16 full-attention layers** grow a KV cache (64 KB/token, 16 GB at 262 K), so only those are converted. DeltaNet and FFN, about 94 % of the compute, are untouched. Design choices:
+
+* **Memory state per KV head.** The 6 query heads of a GQA group share one delta-rule state, because their writes (k, v) are identical anyway. That is 1 MB per layer. Window and sinks work as in Bifrost. **Inside the window the converted model is exactly the teacher** (tested), so chats shorter than W (default 1024) are unchanged. The window is cheap here because there are only 16 layers with 4 KV heads: whole-model cache ≈ 0.3 GB at any length.
+* **Partial RoPE helps.** Only 64 of 256 dims are rotated. The other 192 carry position-free content, which is what a delta-rule memory can store.
+* **Layer-streamed stage A, bf16 teacher.** One layer at a time comes from disk to the GPU. Hidden states of the calibration set (64 × 4096 tokens, 2.7 GB) stay on the GPU and are pushed through each layer, GPTQ-style. Only the full-attention layers train their new parameters (≈ 2 M per layer), matching the teacher's output after `W_o`. Peak memory is several GB, with no quantisation during conversion. The bf16 teacher's top-32 next-token probabilities are saved at the end.
+* **Stage B (optional) on the 4-bit model** (g128, ≈ 12.9 GB) uses a sparse KL against the **bf16** teacher's top-k, so the new gates also absorb part of the 4-bit error. Activations are offloaded to CPU RAM and logits are computed in checkpointed chunks (vocab 248 K). By default only the gate/decay parameters train (`--params gates`).
+* **MTP.** Qwen's own multi-token-prediction layer is loaded, its attention is converted the same way, and `sohbet --mtp` uses it as a draft. Each step verifies 2 tokens in one forward pass, and the output is identical to plain greedy decoding (tested). Which hidden state feeds the MTP layer was measured, not assumed: on Qwen3.5-0.8B the post-final-norm state gives 64 % draft top-1 against the teacher's next-next token, versus 34 % for the pre-norm state.
+
+```bash
+ADIM=prova bash bench/qwen38_donustur.sh    # Qwen3.5-0.8B (same architecture), end-to-end rehearsal
+ADIM=plan  bash bench/qwen38_donustur.sh    # memory plan from config.json only
+ADIM=veri  bash bench/qwen38_donustur.sh && ADIM=a bash bench/qwen38_donustur.sh && ADIM=test bash bench/qwen38_donustur.sh
+ADIM=sohbet bash bench/qwen38_donustur.sh   # chat; cache stays constant across turns
+```
+
+Verified (CPU, `tests/test_hibrit.py`):
+* The teacher matches `transformers`' `Qwen3_5ForCausalLM` on a random model (rel. 1e-4) and on real **Qwen3.5-0.8B** weights (max logit diff 4e-5 at scale 31).
+* Chunked prefill plus token-by-token decoding equals the full forward for teacher, window-only and converted modes.
+* Converted cache size is constant, and MTP-speculative output equals greedy output.
+* A CPU smoke run of all four commands on 0.8B works (tiny data, numbers not meaningful).
+
+**Not measured yet:** any conversion quality on Qwen3.8-27B, its speed on the RX 9070 XT, and stage B's real peak memory at 27B. The ≈ 12.9 GB weight figure is computed, not measured. Inference is plain PyTorch, dequantising 4-bit weights per matmul, so expect a few tokens/s; a llama.cpp port would be needed for fast daily use. MoE variants (e.g. 35B-A3B) are not supported.
+
 ---
 
 ### Will it fit? Planner and local UI (`planla.py`, `arayuz.py`)
@@ -140,7 +167,7 @@ Result (SmolLM2-135M, window 64, GPU, 0.8 M training tokens): WikiText ppl 14.09
 python -m heimdall.planla --model Qwen/Qwen3-8B --gpu 16 --ram 32 --q4 --grad-ckpt   # reads only config.json, no weights
 python -m heimdall.arayuz                                                           # http://127.0.0.1:8765 (local only, no auth)
 ```
-The planner reports parameters, frozen-teacher memory (bf16 / `--q4` / BitNet ternary int8), new trainable parameters, KV cache of the original vs. the converted model (constant), and a green/amber/red training-memory verdict. **Parameter counts and KV/state bytes are exact** (unit-tested against the real `ConvLM`); **activation and logit memory are estimates (±40 %)** to be calibrated from the `tepe GPU` (peak GPU memory) lines that `donustur` now prints. It flags unsupported inputs (MoE, `rope_scaling`, multimodal checkpoints without a text-only loader). `--grad-ckpt` recomputes layers in the backward pass (identical loss and gradients, tested; ~30 % slower, far less activation memory). A layer-by-layer disk-streamed stage A is estimated by the planner but **not implemented**. The UI plans, starts/stops a conversion and tails its log; it refuses to start while `heimdall.train` is running.
+The planner reports parameters, frozen-teacher memory (bf16 / `--q4` / BitNet ternary int8), new trainable parameters, KV cache of the original vs. the converted model (constant), and a green/amber/red training-memory verdict. **Parameter counts and KV/state bytes are exact** (unit-tested against the real `ConvLM`); **activation and logit memory are estimates (±40 %)** to be calibrated from the `tepe GPU` (peak GPU memory) lines that `donustur` now prints. It flags unsupported inputs (MoE, `rope_scaling`, multimodal checkpoints without a text-only loader). `--grad-ckpt` recomputes layers in the backward pass (identical loss and gradients, tested; ~30 % slower, far less activation memory). A layer-by-layer disk-streamed stage A is implemented for the hybrid Qwen3.5-family path (`donustur_hibrit.py`, above) but not yet for `donustur.py`. The UI plans, starts/stops a conversion and tails its log; it refuses to start while `heimdall.train` is running.
 
 BitNet b1.58 teachers: `bash bench/bitnet_donustur.sh` (defaults: batch 1, grad-ckpt). One-command check after stopping a long run: `bash bench/ev_testi.sh`.
 
