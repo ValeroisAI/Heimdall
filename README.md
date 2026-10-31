@@ -141,7 +141,6 @@ Reading: with 1/80 of Pythia's training tokens, Heimdall is in the same range as
 | [`Heimdall/`](Heimdall/README.md) | The active project: model, training, low-bit engine, kernels, Bifrost conversion, server, benchmarks, tests |
 | `04_TOKENIZERLAR/` | Tokenizers (default: `valerois_tokenizer_8k.json`, vocab 8192) |
 | `stream_coder_100k.bin` | 25.6 M-token code corpus (uint16) used in the small-scale studies |
-| `ESKI/` | Archive of earlier research (Bifrost CSL, Kuzgun, Valkir, Kuyu); superseded, kept for history |
 
 ## Quick start
 ```bash

@@ -8,10 +8,8 @@ GercekMimari/kosular/
 GercekMimari/veri/
 checkpoints*/
 
-# ESKI: hiç commit edilmemiş eski deney çıktıları
-ESKI/08_BIFROST_H/data/
-ESKI/08_BIFROST_H/results/**/*.log
-ESKI/08_BIFROST_H/results/**/*.pt
+# Older experiments kept outside this repository
+ESKI/
 
 # Heimdall çalışma çıktıları
 Heimdall/runs/
