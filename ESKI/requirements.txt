@@ -1,5 +1,0 @@
-torch
-gradio
-datasets
-tokenizers
-torch_directml

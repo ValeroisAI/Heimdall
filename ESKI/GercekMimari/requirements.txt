@@ -1,3 +1,0 @@
-numpy>=1.24
-tokenizers>=0.15
-# torch: ROCm için pytorch.org komutuyla ayrıca kurulur (README)
