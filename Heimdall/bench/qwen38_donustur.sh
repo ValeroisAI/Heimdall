@@ -46,6 +46,7 @@ KEEP=${KEEP:-}
 LLAMA=${LLAMA:-$HOME/llama.cpp-bifrost}
 QUANT=${QUANT:-IQ4_XS}
 CTX=${CTX:-131072}
+DERIN=${DERIN:-0,32768}      # llamabench bağlam dolulukları (ör. 0,32768,65536,131072)
 GGUF_TIP=${GGUF_TIP:-q8_0}   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
 hf_dir() { $PY -c "from heimdall.donustur import fetch_model; print(fetch_model('$1'))"; }
 H="$PY -m heimdall.donustur_hibrit"
@@ -79,7 +80,8 @@ case $ADIM in
           $PY llamacpp/bifrost_gguf.py --model "$M" --conv $O/donusum_param.pt --llama $LLAMA --outtype f32 \
             --out $O/q35-08b-bifrost-f32.gguf
           NGL=99 $PY llamacpp/karsilastir.py --gguf $O/q35-08b-bifrost-f32.gguf --model "$M" --conv $O/donusum_param.pt \
-            --bin $LLAMA/build/bin --n 400 --parcalar 200,1,1 ;;
+            --bin $LLAMA/build/bin --n 400 --parcalar 200,1,1
+          NGL=99 $LLAMA/build/bin/bifrost_multiseq $O/q35-08b-bifrost-f32.gguf 2>/dev/null ;;
   llamagguf)
           $PY llamacpp/bifrost_gguf.py --model "$(hf_dir $MODEL)" --conv $OUT/donusum_param.pt --llama $LLAMA \
             --outtype $GGUF_TIP --out $OUT/q38-27b-bifrost-$GGUF_TIP.gguf
@@ -89,7 +91,7 @@ case $ADIM in
   llamasohbet)
           $LLAMA/build/bin/llama-cli -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -c $CTX ;;
   llamabench)
-          $LLAMA/build/bin/llama-bench -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -p 512 -n 64 -d 0,32768 ;;
+          $LLAMA/build/bin/llama-bench -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -p 512 -n 64 -d $DERIN ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;

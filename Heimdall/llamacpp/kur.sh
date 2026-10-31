@@ -50,4 +50,6 @@ esac
 cmake --build build -j"$(nproc)" --target llama-cli llama-server llama-quantize llama-bench llama-perplexity
 g++ -O2 -std=c++17 "$HERE/bifrost_logits.cpp" -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base \
     -Wl,-rpath,"$PWD/build/bin" -o build/bin/bifrost_logits
+g++ -O2 -std=c++17 "$HERE/bifrost_multiseq.cpp" -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base \
+    -Wl,-rpath,"$PWD/build/bin" -o build/bin/bifrost_multiseq
 echo "hazır: $DIR/build/bin (llama-cli, llama-server, llama-quantize, llama-bench, bifrost_logits)"
