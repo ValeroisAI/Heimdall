@@ -1,5 +1,7 @@
-// bifrost_multiseq: iki dizi aynı anda (B=2) ↔ tek tek (B=1); logitler aynı olmalı.  NGL=99 bifrost_multiseq model.gguf
+// bifrost_multiseq: (1) iki dizi aynı anda (B=2) ↔ tek tek (B=1); (2) seq_cp ile kopyalanan dizi farklı devam eder;
+// (3) silinen dizinin hücresinde yeni dizi. Hepsinde logitler tek başına çalıştırmayla aynı olmalı.  NGL=99 bifrost_multiseq model.gguf
 #include "llama.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -46,5 +48,47 @@ int main(int argc, char ** argv) {
     double mx = 0;
     for (int s = 0; s < 2; ++s) for (size_t i = 0; i < ref[s].size(); ++i) mx = fmax(mx, fabs(ref[s][i] - par[s][i]));
     printf("B=2 vs B=1 max logit diff: %.3e\n", mx);
-    return mx < 1e-3 ? 0 : 1;
+
+    // tokens fed one by one (or as a prefill chunk) into seq `s` of context `c`; returns the logits of each token
+    auto run = [&](llama_context * c, int s, const std::vector<int> & t, int pos0, int chunk) {
+        std::vector<float> out;
+        for (size_t a = 0; a < t.size();) {
+            int n = std::min<int>(chunk, t.size() - a);
+            llama_batch b = llama_batch_init(n, 0, 1);
+            for (int i = 0; i < n; ++i) { b.token[i] = t[a + i]; b.pos[i] = pos0 + a + i; b.n_seq_id[i] = 1; b.seq_id[i][0] = s; b.logits[i] = 1; }
+            b.n_tokens = n; if (llama_decode(c, b)) { fprintf(stderr, "decode err\n"); exit(1); }
+            for (int i = 0; i < n; ++i) { float * l = llama_get_logits_ith(c, i); out.insert(out.end(), l, l + nv); }
+            llama_batch_free(b); a += n;
+        }
+        return out;
+    };
+    auto maxdiff = [](const std::vector<float> & a, const std::vector<float> & b) {
+        double m = 0; for (size_t i = 0; i < a.size(); ++i) m = fmax(m, fabs(a[i] - b[i])); return m;
+    };
+    std::vector<int> pre(tok[0].begin(), tok[0].begin() + P + 30), cont(tok[1].begin(), tok[1].begin() + 90);
+    std::vector<int> all = pre; all.insert(all.end(), cont.begin(), cont.end());
+    std::vector<float> want;
+    {   // reference: one fresh sequence
+        llama_context * c = mk(m, 1);
+        std::vector<float> w = run(c, 0, all, 0, 1);
+        want.assign(w.end() - cont.size() * nv, w.end());
+        llama_free(c);
+    }
+    double mcp, mrm;
+    {   // seq 0 runs the prefix, is copied to seq 1, seq 0 continues differently, seq 1 continues like the reference
+        llama_context * c = mk(m, 2);
+        run(c, 0, std::vector<int>(pre.begin(), pre.begin() + P), 0, P);
+        run(c, 0, std::vector<int>(pre.begin() + P, pre.end()), P, 1);
+        llama_memory_seq_cp(llama_get_memory(c), 0, 1, -1, -1);
+        run(c, 0, std::vector<int>(tok[0].begin(), tok[0].begin() + 20), pre.size(), 1);
+        mcp = maxdiff(run(c, 1, cont, pre.size(), 1), want);
+        // remove seq 1 and start a new sequence there: it must not see anything of the old one
+        llama_memory_seq_rm(llama_get_memory(c), 1, -1, -1);
+        std::vector<float> w = run(c, 1, all, 0, 1);
+        mrm = maxdiff(std::vector<float>(w.end() - cont.size() * nv, w.end()), want);
+        llama_free(c);
+    }
+    printf("seq_cp continuation max logit diff: %.3e\n", mcp);
+    printf("reused cell after seq_rm max logit diff: %.3e\n", mrm);
+    return mx < 1e-3 && mcp < 1e-3 && mrm < 1e-3 ? 0 : 1;
 }

@@ -63,9 +63,16 @@ RX 9070 XT, Vulkan (RADV), Qwen3.8-27B Q3_K_M (Bifrost: window 2048, 4 sinks, `l
 | **Bifrost, now** | **33.1** | **33.0** | **32.3** | **834** |
 
 At 32K Bifrost decodes as fast as the original and prefills 22% faster. At 131K the speed is unchanged. The remaining
-gap at short context (~3 ms/token) is the window attention itself: f32 keys read through a strided view (QK^T ≈ 70 µs per
-layer) plus the V transpose copy. Next step: store k/v as f16 head-major planes (or use flash attention) so both matmuls
-read contiguous f16.
+gap at short context (~3 ms/token) was the window attention: f32 keys read through a strided view (QK^T ≈ 70 µs per
+layer) plus the V transpose copy.
+
+* **K / V planes for decode.** The state row now also holds a K plane [D, L, G] and a transposed V plane [L, D, G]. Every
+  write goes to both the region and the planes. The decode attention reads the planes directly: QK^T and p·V are plain
+  contiguous matrix-vector products, with no strided view and no transpose copy. The planes are f32 inside the same state
+  row, so sequence copy / clear / save keep working unchanged. Cost: +17 MB state per converted layer at 27B (~0.26 GB in
+  total). f16 planes would need a separate cache tensor and save maybe ~0.2 ms/token more.
+* `bifrost_multiseq` also checks a `seq_cp` copy that continues differently and a reused cell after `seq_rm`. Both match a
+  fresh single sequence (≤ 1e-5).
 
 Correctness after the speed work:
 * CPU and Vulkan (lavapipe) match PyTorch at ≤ 4.1e-5 with argmax 1.000. Tested with one 400-token chunk, mixed chunks
