@@ -38,8 +38,9 @@ Memory at `n_ctx = 262144` (0.8B Q4_K_M):
 * **State read in place.** Decoding no longer copies the whole per-layer state (~26 MB at 27B) every token. The ring has W+1
   slots, so the row leaving the window and the new row never share a slot, and no ordering ops are needed.
 * **One delta state per KV head** instead of per query head: 6× less state and memory-op work at 27B (24 Q / 4 KV heads).
-* **Grouped window attention in decode.** The R query heads of a KV group are the columns of one matmul, so each key row is
-  read once per group, not once per head.
+* **Window attention in decode** uses one query column per head with the KV head broadcast. A grouped variant (the 6 query
+  heads of a group as 6 columns of one matmul) was 5× slower on RADV: 270 µs vs ~25 µs per layer for p·V. The region length
+  is padded to a multiple of 32.
 * **No layout copies in decode.** 132 → 12 `cont` ops (0.8B).
 
 Measured on CPU (4 threads, Qwen3.5-0.8B Q4_K_M, window 64). The GPU numbers have to come from a real GPU.
@@ -51,6 +52,14 @@ Measured on CPU (4 threads, Qwen3.5-0.8B Q4_K_M, window 64). The GPU numbers hav
 | **Bifrost, now** | 485 | **39.0** | **544** | **38.8** |
 
 Decode ops per token: original 867, Bifrost before 1293, now 1125.
+
+RX 9070 XT, Vulkan (RADV), Qwen3.8-27B Q3_K_M (Bifrost: window 2048, 4 sinks, `layers.63` kept global), llama-bench t/s:
+
+| | tg d0 | tg d32K | tg d131K | pp512 d32K |
+|---|---|---|---|---|
+| original | 37.1 | 32.9 | — | 682 |
+| Bifrost, GDN-256 on CPU | 17.2 | 17.1 | 16.8 | ~320–500 |
+| Bifrost, grouped decode attention | 31.4 | 31.3 | 30.6 | 835 |
 
 Correctness after the speed work:
 * CPU and Vulkan (lavapipe) match PyTorch at ≤ 4.1e-5 with argmax 1.000. Tested with one 400-token chunk, mixed chunks
