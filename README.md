@@ -12,7 +12,7 @@ Heimdall is a from-scratch research codebase (PyTorch, ROCm/CUDA) containing:
 
 1. **A hybrid architecture** — 3 Gated DeltaNet layers (fixed-size recurrent memory) for every 1 global-attention layer, so the inference cache is ~12× smaller than a same-size Transformer's (by calculation).
 2. **A latent-free 1-bit / 1.58-bit training engine** — binary (±1) or ternary weights are the *only* copy of the weights (no fp32 shadow weights, no Adam state); a custom optimizer (`BitFlip`) flips the strongest-gradient weights directly.
-3. **Bifrost** — a method that converts a pretrained open Transformer (Llama/Qwen/SmolLM family) into a constant-memory model by training only ~2 % new parameters.
+3. **Conversion** — a method that converts a pretrained open Transformer (Llama/Qwen/SmolLM family) into a constant-memory model by training only ~2 % new parameters.
 4. **Triton kernels** for int8 and packed 1/2-bit matrix products, and an **OpenAI-compatible inference server** (continuous batching, API keys, rate limits, Prometheus metrics; unit-tested, not load-tested).
 
 ![Heimdall-Bit architecture](docs/architecture.svg)
@@ -57,7 +57,7 @@ At small scale the bit model is clearly ahead; at ~50 M it ties; at ~100 M it is
 
 Most of the quality loss comes from binarizing the attention/DeltaNet projections; keeping those dense and adding a small dense low-rank corrector next to each bit matrix recovers most of it. In the final design **58 % of parameters are 1-bit** (FFN); the rest (mixers, embeddings) stay dense.
 
-### 4. Bifrost: converting a pretrained Transformer to constant memory
+### 4. Conversion: turning a pretrained Transformer into a constant-memory model
 SmolLM2-135M (30 layers), sliding window 64 + 4 attention-sink tokens + delta-rule memory, **0.8 M training tokens (~4 min on the GPU)**, WikiText perplexity at 2 K context:
 
 | | Perplexity |
@@ -132,20 +132,20 @@ Reading: with 1/80 of Pythia's training tokens, Heimdall is in the same range as
 ## Proposed next steps (plan, depends on compute)
 1. **Scale study:** train the binary-FFN hybrid and a dense baseline at 300 M – 1 B parameters on ≥ 10 B tokens, several seeds, to learn whether the bit-vs-dense gap closes at scale.
 2. Evaluate converted models on standard benchmarks and long-context retrieval (RULER-style); extend the scratch-trained model's long-context tests beyond a single synthetic passkey task.
-3. Convert larger open models (Qwen3 1.7–8 B, 4-bit teacher) with Bifrost and measure long-context quality and serving cost.
+3. Convert larger open models (Qwen3 1.7–8 B, 4-bit teacher) with the conversion method and measure long-context quality and serving cost.
 4. Fused low-bit training kernels and end-to-end inference throughput measurements.
 
 ## Repository layout
 | Path | Content |
 |---|---|
-| [`Heimdall/`](Heimdall/README.md) | The active project: model, training, low-bit engine, kernels, Bifrost conversion, server, benchmarks, tests |
+| [`Heimdall/`](Heimdall/README.md) | The active project: model, training, low-bit engine, kernels, conversion, server, benchmarks, tests |
 | `04_TOKENIZERLAR/` | Tokenizers (default: `valerois_tokenizer_8k.json`, vocab 8192) |
 | `stream_coder_100k.bin` | 25.6 M-token code corpus (uint16) used in the small-scale studies |
 | `ESKI/` | Archive of earlier research (Bifrost CSL, Kuzgun, Valkir, Kuyu); superseded, kept for history |
 
 ## Quick start
 ```bash
-git clone https://github.com/valeroisai/bifrost.git && cd bifrost/Heimdall
+git clone https://github.com/valeroisai/heimdall.git && cd heimdall/Heimdall
 python3 -m venv .venv && source .venv/bin/activate
 # AMD RX 9070 XT / ROCm 10.1 (the configuration we measured):
 pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1201]==2.14.0+rocm10.1.0"
