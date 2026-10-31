@@ -18,6 +18,7 @@
 #   ADIM=llamagguf    bash bench/qwen38_donustur.sh   # 27B: q8_0 GGUF (~29 GB) → $QUANT (~14 GB)
 #   ADIM=llamasohbet  bash bench/qwen38_donustur.sh   # llama-cli ile sohbet (bağlam $CTX)
 #   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
+#   ADIM=llamaprofil  bash bench/qwen38_donustur.sh   # Vulkan op süreleri (ORIJ=orijinal.gguf ile karşılaştırma)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
 #        DEVAM=1: aşama A yarıda kaldıysa eğitilmiş katmanları atla (yalnız ileri geçiş)
@@ -92,8 +93,16 @@ case $ADIM in
           $LLAMA/build/bin/llama-cli -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -c $CTX ;;
   llamabench)
           $LLAMA/build/bin/llama-bench -m $OUT/q38-27b-bifrost-$QUANT.gguf -ngl 99 -p 512 -n 64 -d $DERIN ;;
+  llamaprofil)   # Vulkan op süreleri (decode): en pahalı 40 op; ORIJ=<orijinal gguf> verilirse onu da ölçer
+          for M in $OUT/q38-27b-bifrost-$QUANT.gguf ${ORIJ:-}; do
+            echo "== $M"
+            GGML_VK_PERF_LOGGER=1 $LLAMA/build/bin/llama-bench -m "$M" -ngl 99 -p 0 -n 8 -r 1 -d ${PROFIL_D:-0} 2> $OUT/vkperf.log >/dev/null
+            tac $OUT/vkperf.log | sed '/Vulkan Timings/q' | tac | grep ' us = ' \
+              | awk -F' us = ' '{split($2,a," "); printf "%10.1f us  %s\n", a[1], $1}' | sort -gr | head -40
+            tac $OUT/vkperf.log | grep -m1 'Total time'
+          done ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil)"; exit 1 ;;
 esac
