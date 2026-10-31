@@ -202,3 +202,13 @@ def test_vocab_linear_chunks_equal_full():
         b = vocab_linear(mod, h, chunk=64)
         b.sum().backward()
         assert (a - b).abs().max() < 1e-5 and (g_full - h.grad).abs().max() < 1e-5
+
+
+def test_head_topk_equals_log_softmax():
+    from heimdall.donustur_hibrit import head_topk
+    torch.manual_seed(0)
+    lin = torch.nn.Linear(32, 1000, bias=False)
+    h = torch.randn(7, 32) * 3
+    ref_v, ref_i = torch.log_softmax(lin(h), -1).topk(8, -1)
+    v, i = head_topk(h, lin, 8, chunk=96)
+    assert torch.equal(i, ref_i) and (v - ref_v).abs().max() < 1e-4

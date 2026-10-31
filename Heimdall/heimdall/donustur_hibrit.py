@@ -158,6 +158,26 @@ def calib_ids(path, vocab: int, n: int, t: int, seed: int, tok=None, synth: floa
     return torch.from_numpy(out)
 
 
+@torch.no_grad()
+def head_topk(hn, lm_head, k: int, chunk: int = 32768):
+    """log_softmax'ın ilk k'sı, sözlük parça parça: yalnız matmul + max/exp/sum/topk (özel softmax çekirdeği yok).
+    hn: [T, d]. Döndürür (log-olasılık [T,k], indeks [T,k])."""
+    n = lm_head.weight.size(0)
+    lse = best_v = best_i = None
+    for r in range(0, n, chunk):
+        z = F.linear(hn, lm_head.weight[r:r + chunk].to(hn.dtype)).float()            # [T, c]
+        m = z.amax(-1, keepdim=True)
+        part = (z - m).exp().sum(-1, keepdim=True).log() + m
+        lse = part if lse is None else torch.maximum(lse, part) + (-(lse - part).abs()).exp().log1p()
+        v, i = z.topk(min(k, z.size(-1)), -1)
+        i = i + r
+        if best_v is not None:
+            v, j = torch.cat((best_v, v), -1).topk(k, -1)
+            i = torch.cat((best_i, i), -1).gather(-1, j)
+        best_v, best_i = v, i
+    return best_v - lse, best_i
+
+
 def rel_mse(ys, yt):
     return (ys.float() - yt.float()).square().mean() / yt.float().square().mean().clamp(min=1e-8)
 
@@ -254,7 +274,18 @@ def cmd_asama_a(args) -> None:
     t_all = time.time()
     took = {ATTN: [], "linear_attention": []}
     n_attn_left = c.layer_types.count(ATTN) - len(keep) - len(prev) + (1 if w.has("mtp.fc.weight") and not args.no_mtp else 0)
+    h_file = out / "son_gizli.pt"
+    skip_all = False
+    if args.devam and h_file.exists() and len(prev) == c.layer_types.count(ATTN) - len(keep):
+        H = torch.load(h_file, map_location="cpu", weights_only=True).to(h_dev)   # 64 katman zaten bitti
+        conv = [prev[f"layers.{i}"] for i, k_ in enumerate(c.layer_types) if k_ == ATTN and f"layers.{i}" not in keep]
+        params = {k_: v_ for k_, v_ in prev_params.items() if k_.startswith("layers.")}
+        report = {n_: prev_rep.get(n_) for n_ in prev}
+        skip_all = True
+        log(f"devam: tüm katmanlar bitmiş, son gizli durumlar {h_file} dosyasından yüklendi")
     for i, kind in enumerate(c.layer_types):
+        if skip_all:
+            break
         t0 = time.time()
         with torch.device("meta"):
             layer = HLayer(c, kind)
@@ -290,6 +321,10 @@ def cmd_asama_a(args) -> None:
         torch.save({"conv": conv, "params": params, "mtp_hidden": "normed",
                     "meta": {"model": args.model, "rapor": report, "son_katman": i}}, out / "donusum_param.pt")
 
+    if not skip_all:   # sonraki adım çökerse --devam saniyeler içinde buradan sürer
+        torch.save(H.cpu(), h_file)
+        log(f"son gizli durumlar kaydedildi: {h_file} ({gb(H.numel() * H.element_size())})")
+
     # öğretmen (bf16) top-k olasılıkları: aşama B'nin hedefi
     with torch.device("meta"):
         head = nn.ModuleDict({"norm": ZNorm(c.d, c.eps), "lm_head": nn.Linear(c.d, c.vocab, bias=False)})
@@ -301,13 +336,14 @@ def cmd_asama_a(args) -> None:
     k = args.topk
     top_i = torch.zeros(ids.size(0), ids.size(1), k, dtype=torch.int32)
     top_lp = torch.zeros(ids.size(0), ids.size(1), k, dtype=torch.float16)
+    t0 = time.time()
     with torch.no_grad(), amp:
         for j in range(ids.size(0)):
-            hn = head["norm"](H[j:j + 1].to(dev))
-            for s in range(0, ids.size(1), 512):
-                lp = F.log_softmax(vocab_linear(head["lm_head"], hn[:, s:s + 512]).float(), -1)
-                v, ix = lp.topk(k, -1)
-                top_i[j, s:s + 512], top_lp[j, s:s + 512] = ix[0].int().cpu(), v[0].half().cpu()
+            hn = head["norm"](H[j].to(dev))                                              # [T, d]: tüm dizi tek GEMM
+            v, ix = head_topk(hn, head["lm_head"], k)
+            top_i[j], top_lp[j] = ix.int().cpu(), v.half().cpu()
+            if j == 0 or (j + 1) % 16 == 0:
+                log(f"  öğretmen top-{k}: dizi {j + 1}/{ids.size(0)} | {eta((time.time() - t0) / (j + 1) * (ids.size(0) - j - 1))}")
     torch.save({"ids": ids, "top_i": top_i, "top_lp": top_lp}, out / "ogretmen_topk.pt")
     log(f"öğretmen top-{k} kaydedildi: {out / 'ogretmen_topk.pt'}")
 
@@ -323,8 +359,8 @@ def cmd_asama_a(args) -> None:
             hn = head["norm"](hr)
             e = emb[ids[j:j + 1, 1:]].to(dev)
             for mode, hh in (("normed", hn), ("raw", hr)):
-                lg = vocab_linear(head["lm_head"], mtp.norm(mtp.layers[0](mtp.inputs(e, hh[:, :-1]))))
-                acc[mode] = (lg[0, :-1].argmax(-1).cpu() == ids[j, 2:]).float().mean().item()
+                _, top1 = head_topk(mtp.norm(mtp.layers[0](mtp.inputs(e, hh[:, :-1])))[0], head["lm_head"], 1)
+                acc[mode] = (top1[:-1, 0].cpu() == ids[j, 2:]).float().mean().item()
             mtp_hidden = max(acc, key=acc.get)
             log(f"MTP taslak isabeti (x_(i+2), öğretmen): {acc} → giriş = {mtp_hidden}")
             for jj in range(ids.size(0)):                                    # H ← MTP katmanının girdisi
