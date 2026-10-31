@@ -499,7 +499,7 @@ def materialize(root: nn.Module, prefix: str, w: Weights, device, dtype, q4_grou
                 continue
             t = w.get(key)
             if pname == "weight" and q4_eligible(sub, q4_group):
-                q = Q4Linear(t.to(device), q4_group, bits=4)
+                q = Q4Linear(t, q4_group, bits=4, device=device)
                 if sub.bias is not None:
                     q.bias = nn.Parameter(w.get(key[:-6] + "bias").float().to(device), requires_grad=False)
                 _replace(root, name, q)
@@ -564,11 +564,11 @@ class HybridLM(nn.Module):
         else:
             materialize(m, "", w, device, dtype, q4_group, embed_device)
             if own_head:
-                t = m.embed_tokens.weight.data.to(device)
-                m.lm_head = (Q4Linear(t, q4_group, bits=4) if q4_eligible(m.lm_head, q4_group) else
+                t = m.embed_tokens.weight.data
+                m.lm_head = (Q4Linear(t, q4_group, bits=4, device=device) if q4_eligible(m.lm_head, q4_group) else
                              nn.Linear(c.d, c.vocab, bias=False, device=device, dtype=dtype))
                 if isinstance(m.lm_head, nn.Linear):
-                    m.lm_head.weight.data.copy_(t)
+                    m.lm_head.weight.data.copy_(t.to(device))
             if q4_cache is not None:
                 sd = dict(m.state_dict())
                 sd["__q4_surum__"], sd["__q4_surum__t"] = torch.tensor(1), torch.tensor(Q4_CACHE_VERSION)
