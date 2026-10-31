@@ -20,6 +20,7 @@
 #   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
+#        DEVAM=1: aşama A yarıda kaldıysa eğitilmiş katmanları atla (yalnız ileri geçiş)
 #        KEEP="layers.63": o tam dikkat katmanı dönüştürülmez (birebir uzun-menzil hatırlama korunur;
 #        cache token başına 4 KB büyür = orijinalin 1/16'sı, 262K'da 1 GB)
 # İpucu: monitörü anakarttaki (iGPU) çıkışa takarsan masaüstü 9070 XT'den ~0.5-1 GB yemez.
@@ -65,7 +66,7 @@ case $ADIM in
   plan)   $H plan --model $MODEL --window $PENCERE ;;
   veri)   $H hazirla --model $MODEL --veri $VERI --tokens 20e6 ;;
   a)      $H asama-a --model $MODEL --train $VERI/wiki_train.bin --out $OUT --window $PENCERE --kalib $KALIB \
-            --seq-len $SEQ --steps $ADIMA ${KEEP:+--keep-global $KEEP} ;;
+            --seq-len $SEQ --steps $ADIMA ${KEEP:+--keep-global $KEEP} ${DEVAM:+--devam} ;;
   test)   $H degerlendir --model $MODEL --out $OUT --test $VERI/wiki_test.bin --eval-len 8192 --n 4 \
             --sifre 4096 16384 65536 --deneme 2 ;;
   b)      $H asama-b --model $MODEL --out $OUT --seq-len 2048 --steps $ADIMB ;;

@@ -184,3 +184,21 @@ def test_tied_head_q4_cache(tmp_path):
         x, y, z = full(ids), a(ids), b(ids)
     assert (y - z).abs().max() < 1e-6
     assert (x.argmax(-1) == y.argmax(-1)).float().mean() > 0.7
+
+
+def test_vocab_linear_chunks_equal_full():
+    """LM başı parça parça = tek parça (ileri ve geri), düz ve 4-bit."""
+    from heimdall.donustur import Q4Linear
+    from heimdall.hibrit import vocab_linear
+    torch.manual_seed(0)
+    lin = torch.nn.Linear(64, 300, bias=False)
+    q4 = Q4Linear(lin.weight.detach(), 32, bits=4)
+    for mod in (lin, q4):
+        h = torch.randn(2, 5, 64, requires_grad=True)
+        a = mod(h)
+        a.sum().backward()
+        g_full = h.grad.clone()
+        h.grad = None
+        b = vocab_linear(mod, h, chunk=64)
+        b.sum().backward()
+        assert (a - b).abs().max() < 1e-5 and (g_full - h.grad).abs().max() < 1e-5

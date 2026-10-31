@@ -35,6 +35,37 @@ ATTN, LINEAR = "full_attention", "linear_attention"
 Q4_CACHE_VERSION = 2   # 4-bit önbellek biçimi; değişince eski dosyalar yeniden üretilir
 
 
+VOCAB_CHUNK = 32768   # LM başı sözlük parçası (ROCm/gfx1201'de 5120 x 248K tek GEMM için çekirdek yok)
+
+
+class _SliceMM(torch.autograd.Function):
+    """x · W[r0:r1]ᵀ; ağırlık dilimi geri yayılım için saklanmaz, yeniden açılır."""
+
+    @staticmethod
+    def forward(ctx, x, mod, r0, r1):
+        ctx.mod, ctx.r = mod, (r0, r1)
+        return F.linear(x, _rows(mod, r0, r1, x.dtype))
+
+    @staticmethod
+    def backward(ctx, g):
+        return g @ _rows(ctx.mod, *ctx.r, g.dtype), None, None, None
+
+
+def _rows(mod, r0, r1, dtype):
+    return mod.dequant_rows(r0, r1, dtype) if isinstance(mod, Q4Linear) else mod.weight[r0:r1].to(dtype)
+
+
+def vocab_linear(mod, h, chunk: int = VOCAB_CHUNK):
+    """LM başı: büyük sözlükte çıktı sütunlarını parça parça hesaplar (bellek ve çekirdek uyumu)."""
+    n = mod.out_features
+    if n <= 2 * chunk:
+        return mod(h)
+    if torch.is_autocast_enabled(h.device.type):
+        h = h.to(torch.get_autocast_dtype(h.device.type))
+    with torch.autocast(h.device.type, enabled=False):
+        return torch.cat([_SliceMM.apply(h, mod, r, min(r + chunk, n)) for r in range(0, n, chunk)], -1)
+
+
 class HybridConfig:
     def __init__(self, hf: dict) -> None:
         hf = hf.get("text_config", hf)
@@ -593,7 +624,7 @@ class HybridLM(nn.Module):
         return self.norm(x), x
 
     def logits(self, h):
-        return self.lm_head(h).float()
+        return vocab_linear(self.lm_head, h).float()
 
     def forward(self, ids, cache: Optional[dict] = None, last_only: bool = False):
         h, _ = self.hidden(ids, cache)

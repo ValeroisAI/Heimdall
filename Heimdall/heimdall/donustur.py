@@ -111,6 +111,14 @@ class Q4Linear(nn.Module):
         m.register_buffer("zero", torch.empty(out_f, in_f // group, dtype=torch.half, device=device))
         return m
 
+    def dequant_rows(self, r0: int, r1: int, dtype) -> torch.Tensor:
+        """Yalnız [r0, r1) satırlarını aç (büyük sözlük başında tüm matrisi açmadan)."""
+        p = self.packed[r0:r1]
+        q = torch.stack((p & 15, p >> 4), -1) if self.bits == 4 else p
+        n = p.size(0)
+        q = q.reshape(n, -1, self.group).to(dtype)
+        return (q * self.scale[r0:r1].to(dtype)[..., None] + self.zero[r0:r1].to(dtype)[..., None]).view(n, self.in_features)
+
     def dequant(self, dtype) -> torch.Tensor:
         q = torch.stack((self.packed & 15, self.packed >> 4), -1) if self.bits == 4 else self.packed
         q = q.view(self.out_features, -1, self.group).to(dtype)

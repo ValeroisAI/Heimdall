@@ -40,7 +40,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .donustur import fetch_model, prepare_wikitext
-from .hibrit import ATTN, MTP, HLayer, HybridConfig, HybridLM, Weights, ZNorm, materialize
+from .hibrit import ATTN, MTP, HLayer, HybridConfig, HybridLM, Weights, ZNorm, materialize, vocab_linear
 
 FILLER = ("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
           "The river runs to the sea. A small bird sat on the old wall. ")
@@ -243,16 +243,28 @@ def cmd_asama_a(args) -> None:
         f"({h_dev.type}) | pencere {args.window} + {args.sinks} çapa")
     keep = set(args.keep_global)
     report, conv, params = {}, [], {}
+    prev = {}
+    if args.devam and (out / "donusum_param.pt").exists():   # önceki koşunun eğitilmiş katmanları: yeniden eğitme
+        st = torch.load(out / "donusum_param.pt", map_location="cpu", weights_only=False)
+        prev = {cv["name"]: cv for cv in st["conv"] if cv["name"].startswith("layers.")}
+        for cv in prev.values():
+            assert cv["window"] == args.window and cv["sinks"] == args.sinks, "önceki koşu farklı pencere/çapa ile yapılmış"
+        prev_params, prev_rep = st["params"], st.get("meta", {}).get("rapor", {})
+        log(f"devam: {len(prev)} eğitilmiş dikkat katmanı önceki koşudan alınacak (yalnız ileri geçiş yapılır)")
     t_all = time.time()
     took = {ATTN: [], "linear_attention": []}
-    n_attn_left = c.layer_types.count(ATTN) - len(keep) + (1 if w.has("mtp.fc.weight") and not args.no_mtp else 0)
+    n_attn_left = c.layer_types.count(ATTN) - len(keep) - len(prev) + (1 if w.has("mtp.fc.weight") and not args.no_mtp else 0)
     for i, kind in enumerate(c.layer_types):
         t0 = time.time()
         with torch.device("meta"):
             layer = HLayer(c, kind)
         materialize(layer, f"layers.{i}.", w, dev, dtype)
         name = f"layers.{i}"
-        if kind == ATTN and name not in keep:
+        if kind == ATTN and name not in keep and name in prev:
+            conv.append(prev[name])
+            params.update({k_: v_ for k_, v_ in prev_params.items() if k_.startswith(name + ".")})
+            report[name] = prev_rep.get(name)
+        elif kind == ATTN and name not in keep:
             report[name] = train_attention(name, layer, H, args, dev, amp, gpu, log)
             a = layer.self_attn
             conv.append(dict(name=name, window=a.window, sinks=a.sinks, archival=int((a.decay_mask == 0).sum())))
@@ -262,7 +274,7 @@ def cmd_asama_a(args) -> None:
         del layer
         if gpu:
             torch.cuda.empty_cache()
-        trained = kind == ATTN and name not in keep
+        trained = kind == ATTN and name not in keep and name not in prev
         took[ATTN if trained else "linear_attention"].append(time.time() - t0)
         n_attn_left -= trained
         rest = c.layer_types[i + 1:]
@@ -293,7 +305,7 @@ def cmd_asama_a(args) -> None:
         for j in range(ids.size(0)):
             hn = head["norm"](H[j:j + 1].to(dev))
             for s in range(0, ids.size(1), 512):
-                lp = F.log_softmax(head["lm_head"](hn[:, s:s + 512]).float(), -1)
+                lp = F.log_softmax(vocab_linear(head["lm_head"], hn[:, s:s + 512]).float(), -1)
                 v, ix = lp.topk(k, -1)
                 top_i[j, s:s + 512], top_lp[j, s:s + 512] = ix[0].int().cpu(), v[0].half().cpu()
     torch.save({"ids": ids, "top_i": top_i, "top_lp": top_lp}, out / "ogretmen_topk.pt")
@@ -311,7 +323,7 @@ def cmd_asama_a(args) -> None:
             hn = head["norm"](hr)
             e = emb[ids[j:j + 1, 1:]].to(dev)
             for mode, hh in (("normed", hn), ("raw", hr)):
-                lg = head["lm_head"](mtp.norm(mtp.layers[0](mtp.inputs(e, hh[:, :-1]))))
+                lg = vocab_linear(head["lm_head"], mtp.norm(mtp.layers[0](mtp.inputs(e, hh[:, :-1]))))
                 acc[mode] = (lg[0, :-1].argmax(-1).cpu() == ids[j, 2:]).float().mean().item()
             mtp_hidden = max(acc, key=acc.get)
             log(f"MTP taslak isabeti (x_(i+2), öğretmen): {acc} → giriş = {mtp_hidden}")
@@ -348,7 +360,7 @@ def load_model(args, dev, gpu, dtype, mtp: bool = True) -> HybridLM:
 def sparse_kl(h, lm_head, t_i, t_lp, chunk: int = 256):
     """Öğretmenin top-k olasılıklarına KL (+ kalan kütle tek terim). Logitler parça parça, geri yayılımda yeniden hesaplanır."""
     def part(hc, ix, lp):
-        ls = F.log_softmax(lm_head(hc).float(), -1).gather(-1, ix)
+        ls = F.log_softmax(vocab_linear(lm_head, hc).float(), -1).gather(-1, ix)
         pt = lp.float().exp()
         tail_t = (1 - pt.sum(-1)).clamp(min=1e-6)
         tail_s = (1 - ls.exp().sum(-1)).clamp(min=1e-6)
@@ -631,6 +643,8 @@ def main(argv=None) -> None:
     s.add_argument("--sentetik", type=float, default=0.0,
                    help="kalibrasyon dizilerinin bu oranı sentetik hatırlama dizisi (uzaktaki bilgiyi geri getirme)")
     s.add_argument("--h-cpu", action="store_true", help="gizli durumları CPU RAM'de tut (GPU belleği azsa)")
+    s.add_argument("--devam", action="store_true",
+                   help="--out'taki donusum_param.pt'de eğitilmiş katmanları yeniden eğitme (yarıda kalan koşuyu sürdür)")
     s.add_argument("--no-mtp", action="store_true")
     s.set_defaults(fn=cmd_asama_a)
 
