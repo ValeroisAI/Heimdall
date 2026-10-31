@@ -60,6 +60,12 @@ RX 9070 XT, Vulkan (RADV), Qwen3.8-27B Q3_K_M (Bifrost: window 2048, 4 sinks, `l
 | original | 37.1 | 32.9 | — | 682 |
 | Bifrost, GDN-256 on CPU | 17.2 | 17.1 | 16.8 | ~320–500 |
 | Bifrost, grouped decode attention | 31.4 | 31.3 | 30.6 | 835 |
+| **Bifrost, now** | **33.1** | **33.0** | **32.3** | **834** |
+
+At 32K Bifrost decodes as fast as the original and prefills 22% faster. At 131K the speed is unchanged. The remaining
+gap at short context (~3 ms/token) is the window attention itself: f32 keys read through a strided view (QK^T ≈ 70 µs per
+layer) plus the V transpose copy. Next step: store k/v as f16 head-major planes (or use flash attention) so both matmuls
+read contiguous f16.
 
 Correctness after the speed work:
 * CPU and Vulkan (lavapipe) match PyTorch at ≤ 4.1e-5 with argmax 1.000. Tested with one 400-token chunk, mixed chunks
