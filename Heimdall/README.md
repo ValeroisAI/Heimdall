@@ -121,7 +121,7 @@ Sample (T=0.8, top-k 40): syntactically valid Python with a plausible class stru
 
 ---
 
-## 5. Bifrost: converting a pretrained Transformer (`heimdall/donustur.py`)
+## 5. Conversion: turning a pretrained Transformer into a constant-memory model (`heimdall/donustur.py`)
 
 Each attention layer of an open model (Llama, Qwen2/3, SmolLM) is replaced by: exact **sliding-window softmax attention** over the last W tokens plus 4 attention-sink tokens (identical to the teacher inside the window), plus a **gated delta-rule memory** that receives every token when it leaves the window, plus a **mass gate** that mixes them using the window's log-normalizer. The teacher's q/k/v/o weights are reused unchanged; only ~2 % new parameters are trained, in two stages: (A) layer-wise attention transfer, (B) end-to-end KL distillation.
 ```bash
@@ -168,7 +168,7 @@ OpenAI-compatible `POST /v1/completions` and `/v1/chat/completions` (SSE streami
 | `bench/karsilastir_valkir.py` | Same-window comparison of a checkpoint with the legacy Valkir 16L model |
 | `bench/uret.py` | Text generation from a checkpoint |
 | `bench/dur.sh`, `devam.sh` | Cleanly pause (checkpoint at the current step) and resume the multi-day run |
-| `bench/bitnet_donustur.sh`, `ev_testi.sh` | Bifrost conversion of Microsoft BitNet b1.58-2B-4T; one-command stop → tests → plan → GPU smoke test |
+| `bench/bitnet_donustur.sh`, `ev_testi.sh` | Conversion of Microsoft BitNet b1.58-2B-4T; one-command stop → tests → plan → GPU smoke test |
 | `bench/lmeval_heimdall.py` | Zero-shot standard benchmarks (ARC, HellaSwag, PIQA, Winogrande, LAMBADA, WikiText word-perplexity) for a Heimdall checkpoint via lm-evaluation-harness; prints chance levels next to results. Adapter unit-tested (batched = one-by-one scoring); results and public-model comparison in the root README, section 8. `bench/ref_ozet.py` tabulates Heimdall and `lm_eval` reference runs |
 | `bench/sft_veri.py` | Merges public SFT datasets into one OpenAI-chat JSONL for fine-tuning *other* models (not used by Heimdall's own training); filters broken tool traces, deduplicates, records provenance. Note on third-party model outputs in its docstring. |
 | `python -m heimdall.compare runA runB` | Compare `log.jsonl` of runs |
