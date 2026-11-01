@@ -1,0 +1,163 @@
+# Valerois Runtime: Bifrost-patched llama.cpp (Vulkan: AMD, NVIDIA, Intel) for Linux x64 and Windows x64.
+#   - every push to Heimdall/llamacpp or Heimdall/runtime and manual runs: build and upload artifacts
+#   - a tag "runtime-v*" (e.g. runtime-v0.1.0): also publish a GitHub release with SHA256SUMS
+name: valerois-runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    tags: ['runtime-v*']
+    paths:                     # branch pushes only; tag pushes always build
+      - 'Heimdall/llamacpp/**'
+      - 'Heimdall/runtime/**'
+      - '.github/workflows/valerois-runtime.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: valerois-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VULKAN_VERSION: 1.4.357.0
+  # no web UI (Nova is the UI) and no network fetch at build time
+  COMMON_CMAKE: -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_CURL=OFF
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      name: ${{ steps.v.outputs.name }}
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/runtime-v* ]]; then echo "name=${GITHUB_REF#refs/tags/runtime-}" >> "$GITHUB_OUTPUT";
+          else echo "name=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"; fi
+
+  linux-x64:
+    needs: version
+    runs-on: ubuntu-22.04          # older glibc: the binaries also run on older distributions
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (LunarG Vulkan SDK)
+        run: |
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential vulkan-sdk
+
+      - name: Clone llama.cpp and apply the Bifrost patch
+        run: |
+          COMMIT=$(cat Heimdall/llamacpp/LLAMA_CPP_COMMIT)
+          git init -q llama.cpp && cd llama.cpp
+          git remote add origin https://github.com/ggml-org/llama.cpp
+          git fetch -q --depth 1 origin "$COMMIT" && git checkout -q FETCH_HEAD
+          git apply ../Heimdall/llamacpp/bifrost.patch
+
+      - name: Build
+        working-directory: llama.cpp
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON $COMMON_CMAKE
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Package
+        run: |
+          N=valerois-runtime-${{ needs.version.outputs.name }}-linux-x64-vulkan
+          mkdir -p $N/bin
+          cp -a llama.cpp/build/bin/. $N/bin/
+          cp Heimdall/runtime/valerois-runtime $N/ && chmod +x $N/valerois-runtime
+          cp Heimdall/runtime/README.md $N/README.md
+          cp llama.cpp/LICENSE $N/LICENSE-llama.cpp
+          git rev-parse HEAD > $N/VERSION
+          tar -czf $N.tar.gz $N
+          sha256sum $N.tar.gz > $N.tar.gz.sha256
+
+      - name: Smoke test (the runner has no GPU, so only start-up and linking)
+        run: |
+          N=valerois-runtime-${{ needs.version.outputs.name }}-linux-x64-vulkan
+          $N/bin/llama-server --version
+          ldd $N/bin/llama-server | grep -q "not found" && exit 1 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: valerois-runtime-*-linux-x64-vulkan.tar.gz*
+
+  windows-x64:
+    needs: version
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Clone llama.cpp and apply the Bifrost patch
+        shell: bash
+        run: |
+          COMMIT=$(cat Heimdall/llamacpp/LLAMA_CPP_COMMIT)
+          git init -q llama.cpp && cd llama.cpp
+          git remote add origin https://github.com/ggml-org/llama.cpp
+          git fetch -q --depth 1 origin "$COMMIT" && git checkout -q FETCH_HEAD
+          git apply ../Heimdall/llamacpp/bifrost.patch
+
+      - name: Build
+        shell: cmd
+        working-directory: llama.cpp
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake -DGGML_OPENMP=ON -DGGML_OPENMP_FETCH=ON %COMMON_CMAKE%
+          cmake --build build --config Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $N = "valerois-runtime-${{ needs.version.outputs.name }}-windows-x64-vulkan"
+          New-Item -ItemType Directory -Force "$N\bin" | Out-Null
+          Copy-Item llama.cpp\build\bin\Release\* "$N\bin\" -Recurse
+          Copy-Item Heimdall\runtime\valerois-runtime.ps1, Heimdall\runtime\valerois-runtime.cmd "$N\"
+          Copy-Item Heimdall\runtime\README.md "$N\README.md"
+          Copy-Item llama.cpp\LICENSE "$N\LICENSE-llama.cpp"
+          git rev-parse HEAD | Out-File -Encoding ascii "$N\VERSION"
+          & "$N\bin\llama-server.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          7z a -tzip "$N.zip" $N | Out-Null
+          $h = (Get-FileHash "$N.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $N.zip" | Out-File -Encoding ascii "$N.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: valerois-runtime-*-windows-x64-vulkan.zip*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/runtime-v')
+    needs: [version, linux-x64, windows-x64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: cd dist && cat *.sha256 > SHA256SUMS && rm *.sha256 && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Valerois Runtime ${{ needs.version.outputs.name }}
+          files: dist/*
+          body: |
+            Bifrost-patched llama.cpp (Vulkan) for Linux x64 and Windows x64. Start: `valerois-runtime model.gguf`
+            (Windows: `valerois-runtime.cmd model.gguf`), then in Nova choose Settings → Models → Local.
+            Check downloads against SHA256SUMS.

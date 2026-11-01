@@ -19,6 +19,7 @@
 #   ADIM=llamasohbet  bash bench/qwen38_donustur.sh   # llama-cli ile sohbet (bağlam $CTX)
 #   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
 #   ADIM=llamaprofil  bash bench/qwen38_donustur.sh   # Vulkan op süreleri (ORIJ=orijinal.gguf ile karşılaştırma)
+#   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
 #        DEVAM=1: aşama A yarıda kaldıysa eğitilmiş katmanları atla (yalnız ileri geçiş)
@@ -101,8 +102,9 @@ case $ADIM in
               | awk -F' us = ' '{split($2,a," "); printf "%10.1f us  %s\n", a[1], $1}' | sort -gr | head -40
             tac $OUT/vkperf.log | grep -m1 'Total time'
           done ;;
+  sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | sunucu)"; exit 1 ;;
 esac
