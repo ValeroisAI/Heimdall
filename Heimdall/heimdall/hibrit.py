@@ -184,6 +184,12 @@ class GatedDeltaNet(nn.Module):
         return self.out_proj(o.reshape(b, t, self.vd))
 
 
+def n_archival(frac: float, hkv: int, mem_init: str = "long") -> int:
+    """Never-forgetting memory heads; "long" keeps at least one (int(0.25 * 2) = 0 left the 0.8B without any)."""
+    n = int(frac * hkv)
+    return max(1, n) if mem_init == "long" and frac > 0 else n
+
+
 class HybridAttention(nn.Module):
     """Qwen3.5 kapılı tam dikkat (öğretmen) ve sabit bellekli dönüşümü (öğrenci)."""
 
@@ -202,7 +208,10 @@ class HybridAttention(nn.Module):
         self.mode = "teacher"       # teacher | student | window (hafızasız, karşılaştırma)
 
     # ------------------------------------------------------------------ dönüşüm
-    def convert(self, window: int, sinks: int, archival: int) -> None:
+    def convert(self, window: int, sinks: int, archival: int, mem_init: str = "long") -> None:
+        """mem_init="long": decay half-lives log-uniform in [window, 1e6] tokens and a read scale of sqrt(dh), so the
+        memory carries what leaves the window. "mamba": the first version (half-lives of ~1-400 tokens, scale 1),
+        kept to reproduce old runs; loading a trained conversion overwrites these values either way."""
         c = self.c
         dev = self.k_norm.weight.device
         self.window, self.sinks = window, sinks
@@ -215,10 +224,16 @@ class HybridAttention(nn.Module):
             nn.init.zeros_(lin.bias)
         nn.init.constant_(self.mix.bias, -2.0)
         self.mix_lse = nn.Parameter(torch.zeros(c.h, device=dev))
-        self.mem_scale = nn.Parameter(torch.ones(c.h, device=dev))
-        self.A_log = nn.Parameter(torch.empty(c.hkv, device=dev).uniform_(1.0, 16.0).log())
         dt = torch.exp(torch.empty(c.hkv, device=dev).uniform_(math.log(1e-3), math.log(1e-1)))
         self.dt_bias = nn.Parameter(dt + torch.log(-torch.expm1(-dt)))
+        if mem_init == "mamba":
+            self.mem_scale = nn.Parameter(torch.ones(c.h, device=dev))
+            self.A_log = nn.Parameter(torch.empty(c.hkv, device=dev).uniform_(1.0, 16.0).log())
+        else:
+            # read output ~ v * cos / sqrt(dh) (unit keys, query scaled by dh^-0.5): undo that scale at the start
+            self.mem_scale = nn.Parameter(torch.full((c.h,), float(c.dh) ** 0.5, device=dev))
+            life = torch.logspace(math.log10(max(window, 2)), 6.0, c.hkv, device=dev)   # tokens
+            self.A_log = nn.Parameter((math.log(2.0) / (life * dt)).log())             # A * dt = ln2 / life
         mask = torch.ones(c.hkv, device=dev)
         mask[:archival] = 0.0
         self.register_buffer("decay_mask", mask, persistent=False)
@@ -593,10 +608,11 @@ class HybridLM(nn.Module):
             out += [(f"mtp.layers.{i}", l.self_attn) for i, l in enumerate(self.mtp.layers)]
         return out
 
-    def convert(self, window: int = 512, sinks: int = 4, archival_frac: float = 0.25, keep_global=()) -> None:
+    def convert(self, window: int = 512, sinks: int = 4, archival_frac: float = 0.25, keep_global=(),
+                mem_init: str = "long") -> None:
         for name, a in self.attn_modules():
             if name not in keep_global:
-                a.convert(window, sinks, int(archival_frac * self.c.hkv))
+                a.convert(window, sinks, n_archival(archival_frac, self.c.hkv, mem_init), mem_init)
 
     def set_mode(self, mode: str) -> None:
         for _, a in self.attn_modules():

@@ -212,3 +212,17 @@ def test_head_topk_equals_log_softmax():
     ref_v, ref_i = torch.log_softmax(lin(h), -1).topk(8, -1)
     v, i = head_topk(h, lin, 8, chunk=96)
     assert torch.equal(i, ref_i) and (v - ref_v).abs().max() < 1e-4
+
+
+def test_long_memory_init():
+    """mem_init="long": at least one never-forgetting head, other half-lives from the window to 1M tokens, read scale
+    sqrt(dh); "mamba" keeps the first version."""
+    import math
+    from heimdall.hibrit import n_archival
+    assert n_archival(0.25, 2) == 1 and n_archival(0.25, 2, "mamba") == 0 and n_archival(0.25, 4) == 1
+    m = HybridLM(HybridConfig(TEXT))
+    m.convert(window=16, sinks=2, archival_frac=0.25)
+    a = next(a for _, a in m.attn_modules())
+    life = math.log(2) / (a.A_log.exp() * torch.nn.functional.softplus(a.dt_bias))
+    assert a.decay_mask[0] == 0 and torch.allclose(life, torch.logspace(math.log10(16), 6, TEXT["num_key_value_heads"]), rtol=1e-3)
+    assert torch.allclose(a.mem_scale, torch.full_like(a.mem_scale, TEXT["head_dim"] ** 0.5))

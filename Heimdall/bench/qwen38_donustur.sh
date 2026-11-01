@@ -21,6 +21,11 @@
 #   ADIM=llamaprofil  bash bench/qwen38_donustur.sh   # Vulkan op süreleri (ORIJ=orijinal.gguf ile karşılaştırma)
 #   ADIM=llamakeep    bash bench/qwen38_donustur.sh   # 3 katmanı daha tam dikkate döndür (KEEP4=15,31,47), hız + PPL karşılaştır
 #   ADIM=llamaparola  bash bench/qwen38_donustur.sh   # parola testi 8K/32K/64K: 15/1, 12/4 (hafıza açık/kapalı), orijinal
+#
+#   Hafıza v2 (yarı ömür pencere..1M, okuma ölçeği sqrt(dh), pencere dışı kayıp, 4×pencere dizi + %25 sentetik hatırlama):
+#   ADIM=provahafiza  bash bench/qwen38_donustur.sh   # 0.8B: v1 ↔ v2 ↔ v2 hafızasız ↔ orijinal (parola + PPL), ~30-60 dk
+#   ADIM=a2           bash bench/qwen38_donustur.sh   # 27B aşama A v2 → $OUT2 (varsayılan runs/q38_h2), KEEP2 global kalır
+#   ADIM=a2test       bash bench/qwen38_donustur.sh   # a2 sonrası: GGUF + parola + PPL + hız
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -51,7 +56,17 @@ LLAMA=${LLAMA:-$HOME/llama.cpp-bifrost}
 QUANT=${QUANT:-IQ4_XS}
 CTX=${CTX:-131072}
 DERIN=${DERIN:-0,32768}      # llamabench bağlam dolulukları (ör. 0,32768,65536,131072)
-GGUF_TIP=${GGUF_TIP:-q8_0}   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
+GGUF_TIP=${GGUF_TIP:-q8_0}
+OUT2=${OUT2:-runs/q38_h2}
+KEEP2=${KEEP2:-layers.15 layers.31 layers.47 layers.63}   # 12/4: 4 tam dikkat katmanı kalır
+pk() {   # parola testi: model, bağlamlar
+  [ -x $LLAMA/build/bin/bifrost_passkey ] && [ llamacpp/bifrost_passkey.cpp -ot $LLAMA/build/bin/bifrost_passkey ] || \
+    g++ -O2 -std=c++17 llamacpp/bifrost_passkey.cpp -I$LLAMA/include -I$LLAMA/ggml/include -L$LLAMA/build/bin \
+      -lllama -lggml -lggml-base -Wl,-rpath,$LLAMA/build/bin -o $LLAMA/build/bin/bifrost_passkey
+  echo "== $1"
+  NGL=99 CTK=${CTK:-q8_0} CTV=${CTV:-q8_0} $LLAMA/build/bin/bifrost_passkey $1 $2 ${PAROLA_D:-0.1,0.5,0.9} ${PAROLA_N:-2} \
+    2>/dev/null | grep -E "yanlış|DOĞRU|doğruluk" || true
+}   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
 hf_dir() { $PY -c "from heimdall.donustur import fetch_model; print(fetch_model('$1'))"; }
 H="$PY -m heimdall.donustur_hibrit"
 command -v "$PY" >/dev/null || { echo "python bulunamadı: önce 'source .venv101/bin/activate' (ya da PY=python3)"; exit 1; }
@@ -134,9 +149,42 @@ case $ADIM in
           done
           echo "== 131K neden düştü: 12/4, KV q4_0"
           $LLAMA/build/bin/llama-bench -m $K -ngl 99 -fa 1 -ctk q4_0 -ctv q4_0 -p 0 -n 16 -d 131072 2>&1 | tail -6 || true ;;
+  provahafiza)
+          M=Qwen/Qwen3.5-0.8B; HFM=$(hf_dir $M); V=veri/qwen_wiki_prova; O1=runs/q35_08b_prova; O2=runs/q35_08b_h2
+          [ -f $V/wiki_train.bin ] || $H hazirla --model $M --veri $V --tokens 5e6
+          [ -f $O2/donusum_param.pt ] || $H asama-a --model $M --train $V/wiki_train.bin --out $O2 --window 256 \
+            --kalib 32 --seq-len 2048 --steps 300 --sentetik 0.25 --mem-init long
+          $PY bench/bifrost_param_ozet.py $O2/donusum_param.pt
+          [ -f runs/q35_08b_orijinal-f16.gguf ] || $PY $LLAMA/convert_hf_to_gguf.py $HFM --outtype f16 \
+            --outfile runs/q35_08b_orijinal-f16.gguf >/dev/null 2>&1
+          for o in $O1 $O2; do
+            [ -f $o/bifrost-f16.gguf ] || $PY llamacpp/bifrost_gguf.py --model $HFM --conv $o/donusum_param.pt --llama $LLAMA \
+              --outtype f16 --out $o/bifrost-f16.gguf >/dev/null 2>&1
+          done
+          [ -f $O2/bifrost-f16-memoff.gguf ] || $PY llamacpp/bifrost_keep.py --in $O2/bifrost-f16.gguf \
+            --out $O2/bifrost-f16-memoff.gguf --mem-off --llama $LLAMA >/dev/null
+          for m in $O1/bifrost-f16.gguf $O2/bifrost-f16.gguf $O2/bifrost-f16-memoff.gguf runs/q35_08b_orijinal-f16.gguf; do
+            pk $m ${PAROLA_L:-1024,2048,4096,8192}
+            $LLAMA/build/bin/llama-perplexity -m $m -f veri/wiki_test.txt -ngl 99 -c 4096 --chunks 8 2>&1 | grep "Final estimate" || true
+          done ;;
+  a2)     $H asama-a --model $MODEL --train $VERI/wiki_train.bin --out $OUT2 --window $PENCERE --kalib ${KALIB2:-32} \
+            --seq-len ${SEQ2:-8192} --steps ${ADIMA2:-300} --sentetik ${SENT:-0.25} --mem-init long \
+            --keep-global $KEEP2 ${DEVAM:+--devam} ;;
+  a2test)
+          [ -f $OUT2/q38-27b-h2-$GGUF_TIP.gguf ] || [ -f $OUT2/q38-27b-h2-$QUANT.gguf ] || \
+            $PY llamacpp/bifrost_gguf.py --model "$(hf_dir $MODEL)" --conv $OUT2/donusum_param.pt --llama $LLAMA \
+              --outtype $GGUF_TIP --out $OUT2/q38-27b-h2-$GGUF_TIP.gguf
+          [ -f $OUT2/q38-27b-h2-$QUANT.gguf ] || { $LLAMA/build/bin/llama-quantize $([ $GGUF_TIP = q8_0 ] && echo --allow-requantize) \
+            $OUT2/q38-27b-h2-$GGUF_TIP.gguf $OUT2/q38-27b-h2-$QUANT.gguf $QUANT && rm -f $OUT2/q38-27b-h2-$GGUF_TIP.gguf; }
+          $PY bench/bifrost_param_ozet.py $OUT2/donusum_param.pt
+          pk $OUT2/q38-27b-h2-$QUANT.gguf ${PAROLA_L:-8192,32768,65536}
+          $LLAMA/build/bin/llama-perplexity -m $OUT2/q38-27b-h2-$QUANT.gguf -f veri/wiki_test.txt -ngl 99 -c 8192 --chunks 8 \
+            -fa on -ctk q8_0 -ctv q8_0 2>&1 | grep "Final estimate" || true
+          $LLAMA/build/bin/llama-bench -m $OUT2/q38-27b-h2-$QUANT.gguf -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 512 -n 64 \
+            -d ${DERIN:-0,32768,131072} 2>&1 | grep -E "^\| qwen" || true ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | sunucu)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | provahafiza | a2 | a2test | sunucu)"; exit 1 ;;
 esac

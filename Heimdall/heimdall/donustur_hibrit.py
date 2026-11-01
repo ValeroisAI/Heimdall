@@ -40,7 +40,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .donustur import fetch_model, prepare_wikitext
-from .hibrit import ATTN, MTP, HLayer, HybridConfig, HybridLM, Weights, ZNorm, materialize, vocab_linear
+from .hibrit import ATTN, MTP, n_archival, HLayer, HybridConfig, HybridLM, Weights, ZNorm, materialize, vocab_linear
 
 FILLER = ("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
           "The river runs to the sea. A small bird sat on the old wall. ")
@@ -135,14 +135,17 @@ def recall_sequence(tok, data, t: int, rng, n_facts: int = 12) -> np.ndarray:
         a, q = _TEMPLATES[int(rng.integers(len(_TEMPLATES)))]
         facts.append((tok.encode(" " + a.format(k=k, v=v, p=p)).ids, tok.encode(" " + q.format(k=k, v=v, p=p)).ids))
     early, late = int(0.3 * t), int(0.7 * t)
+    span = max(len(x) for f in facts for x in f) + 2
+    room = lambda lo, hi: np.arange(lo, max(lo + 1, hi - span), span)
+    n = min(n_facts, len(room(4, early)), len(room(late, t - 2)))     # short sequences hold fewer facts
+    facts = facts[:n]
 
     def place(lo, hi, pieces):
-        span = max(len(x) for x in pieces) + 2
-        slots = np.sort(rng.choice(np.arange(lo, max(lo + 1, hi - span), span), size=len(pieces), replace=False))
+        slots = np.sort(rng.choice(room(lo, hi), size=len(pieces), replace=False))
         for st_, x in zip(slots, pieces):
             seq[st_:st_ + len(x)] = x
     place(4, early, [f for f, _ in facts])
-    order = rng.permutation(n_facts)
+    order = rng.permutation(n)
     place(late, t - 2, [facts[i][1] for i in order])
     return seq
 
@@ -178,7 +181,11 @@ def head_topk(hn, lm_head, k: int, chunk: int = 32768):
     return best_v - lse, best_i
 
 
-def rel_mse(ys, yt):
+def rel_mse(ys, yt, skip: int = 0):
+    """Relative squared error. skip: positions [0, skip) are left out (inside the window the student equals the
+    teacher exactly, so they only dilute the signal of the positions that need the memory)."""
+    if 0 < skip < ys.size(1):
+        ys, yt = ys[:, skip:], yt[:, skip:]
     return (ys.float() - yt.float()).square().mean() / yt.float().square().mean().clamp(min=1e-8)
 
 
@@ -186,7 +193,7 @@ def rel_mse(ys, yt):
 def train_attention(name, layer, H, args, dev, amp, gpu, log):
     """Bir tam dikkat katmanının yeni parametrelerini öğretmen çıkışına (W_o sonrası) eğitir."""
     a = layer.self_attn
-    a.convert(args.window, args.sinks, int(args.archival_frac * a.c.hkv))
+    a.convert(args.window, args.sinks, n_archival(args.archival_frac, a.c.hkv, args.mem_init), args.mem_init)
     params = a.new_params("all")
     for p in params:
         p.requires_grad_(True)
@@ -202,7 +209,7 @@ def train_attention(name, layer, H, args, dev, amp, gpu, log):
         with torch.no_grad(), amp:
             for j in range(n - n_val, n):
                 yt, ys = a.distill_pair(layer.input_layernorm(H[j:j + 1].to(dev)))
-                tot += rel_mse(ys, yt).item()
+                tot += rel_mse(ys, yt, args.window).item()
         a.mode = "student"
         return tot / n_val
 
@@ -214,7 +221,7 @@ def train_attention(name, layer, H, args, dev, amp, gpu, log):
         j = torch.from_numpy(rng.choice(tr, args.batch, replace=False))
         with amp:
             yt, ys = a.distill_pair(layer.input_layernorm(H[j].to(dev)))
-            loss = rel_mse(ys, yt)
+            loss = rel_mse(ys, yt, args.window)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
@@ -669,6 +676,8 @@ def main(argv=None) -> None:
     s.add_argument("--window", type=int, default=1024)
     s.add_argument("--sinks", type=int, default=4)
     s.add_argument("--archival-frac", type=float, default=0.25, help="hiç unutmayan hafıza kafası oranı")
+    s.add_argument("--mem-init", choices=["long", "mamba"], default="long",
+                   help="hafıza başlangıcı: long = yarı ömür pencere..1M token, okuma ölçeği sqrt(dh); mamba = ilk sürüm")
     s.add_argument("--keep-global", nargs="*", default=[], help="dönüştürülmeyecek katmanlar, ör. layers.63")
     s.add_argument("--kalib", type=int, default=64, help="kalibrasyon dizisi sayısı")
     s.add_argument("--seq-len", type=int, default=4096)
