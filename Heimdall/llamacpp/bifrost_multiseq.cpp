@@ -68,10 +68,16 @@ int main(int argc, char ** argv) {
     std::vector<int> pre(tok[0].begin(), tok[0].begin() + P + 30), cont(tok[1].begin(), tok[1].begin() + 90);
     std::vector<int> all = pre; all.insert(all.end(), cont.begin(), cont.end());
     std::vector<float> want;
-    {   // reference: one fresh sequence
+    // reference: one fresh sequence, chunked the same way (prefill P, then single tokens): on GPUs prefill and decode
+    // use different kernels, so a different chunking alone changes logits at the 1e-2 level
+    auto fresh = [&](llama_context * c, int s) {
+        std::vector<float> a = run(c, s, std::vector<int>(all.begin(), all.begin() + P), 0, P);
+        std::vector<float> b = run(c, s, std::vector<int>(all.begin() + P, all.end()), P, 1);
+        return std::vector<float>(b.end() - cont.size() * nv, b.end());
+    };
+    {
         llama_context * c = mk(m, 1);
-        std::vector<float> w = run(c, 0, all, 0, 1);
-        want.assign(w.end() - cont.size() * nv, w.end());
+        want = fresh(c, 0);
         llama_free(c);
     }
     double mcp, mrm;
@@ -84,8 +90,7 @@ int main(int argc, char ** argv) {
         mcp = maxdiff(run(c, 1, cont, pre.size(), 1), want);
         // remove seq 1 and start a new sequence there: it must not see anything of the old one
         llama_memory_seq_rm(llama_get_memory(c), 1, -1, -1);
-        std::vector<float> w = run(c, 1, all, 0, 1);
-        mrm = maxdiff(std::vector<float>(w.end() - cont.size() * nv, w.end()), want);
+        mrm = maxdiff(fresh(c, 1), want);
         llama_free(c);
     }
     printf("seq_cp continuation max logit diff: %.3e\n", mcp);

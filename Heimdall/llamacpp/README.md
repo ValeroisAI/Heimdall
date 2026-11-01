@@ -60,7 +60,8 @@ RX 9070 XT, Vulkan (RADV), Qwen3.8-27B Q3_K_M (Bifrost: window 2048, 4 sinks, `l
 | original | 37.1 | 32.9 | — | 682 |
 | Bifrost, GDN-256 on CPU | 17.2 | 17.1 | 16.8 | ~320–500 |
 | Bifrost, grouped decode attention | 31.4 | 31.3 | 30.6 | 835 |
-| **Bifrost, now** | **33.1** | **33.0** | **32.3** | **834** |
+| Bifrost, per-head decode attention | 33.1 | 33.0 | 32.3 | 834 |
+| **Bifrost, K/V planes** | **33.7** | **33.7** | **32.9** | **832** |
 
 At 32K Bifrost decodes as fast as the original and prefills 22% faster. At 131K the speed is unchanged. The remaining
 gap at short context (~3 ms/token) was the window attention: f32 keys read through a strided view (QK^T ≈ 70 µs per
@@ -71,6 +72,8 @@ layer) plus the V transpose copy.
   contiguous matrix-vector products, with no strided view and no transpose copy. The planes are f32 inside the same state
   row, so sequence copy / clear / save keep working unchanged. Cost: +17 MB state per converted layer at 27B (~0.26 GB in
   total). f16 planes would need a separate cache tensor and save maybe ~0.2 ms/token more.
+* With the planes, QK^T dropped from 70 to 44 µs per layer. The remaining gap at short context (~2.7 ms/token) is mostly
+  the ~40 extra small ops per converted layer (3–7 µs each on RADV). Closing it needs a fused Bifrost decode kernel.
 * `bifrost_multiseq` also checks a `seq_cp` copy that continues differently and a reused cell after `seq_rm`. Both match a
   fresh single sequence (≤ 1e-5).
 
