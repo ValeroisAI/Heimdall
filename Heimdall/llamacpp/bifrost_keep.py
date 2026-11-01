@@ -5,6 +5,7 @@
 
 Yeniden eğitim gerekmez: aşama A her katmanı öğretmenin girdileriyle ayrı ayrı eğitir, katmanlar birbirinden bağımsızdır.
 Ağırlıklar yeniden nicemlenmez, olduğu gibi kopyalanır (Q3_K_M kalır). Numara = blok numarası (layers.N).
+--mem-off: teşhis için hafıza dalını kapatır (karışım kapısı ~0): yalnız pencere + çapa kalır.
 """
 import argparse
 import sys
@@ -15,7 +16,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--in", dest="src", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--keep", required=True, help="tam dikkate dönecek katmanlar, ör. 15,31,47")
+    p.add_argument("--keep", default="", help="tam dikkate dönecek katmanlar, ör. 15,31,47")
+    p.add_argument("--mem-off", action="store_true", help="hafıza dalını kapat (gamma ≈ 0), teşhis için")
     p.add_argument("--llama", required=True, help="llama.cpp klasörü (gguf-py için)")
     a = p.parse_args()
     sys.path.insert(0, str(Path(a.llama).expanduser() / "gguf-py"))
@@ -26,6 +28,8 @@ def main() -> None:
     arch = r.fields[gguf.Keys.General.ARCHITECTURE].contents()
     key = f"{arch}.bifrost.layers"
     flags = list(r.fields[key].contents())
+    if not keep and not a.mem_off:
+        raise SystemExit("--keep ya da --mem-off gerekli")
     bad = sorted(i for i in keep if i >= len(flags) or not flags[i])
     if bad:
         raise SystemExit(f"bu katmanlar zaten dönüştürülmemiş (ya da yok): {bad}")
@@ -48,10 +52,15 @@ def main() -> None:
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_ti_data_to_file()
+    import numpy as np
     for t in tensors:
-        w.write_tensor_data(t.data, tensor_endianess=r.endianess)
+        data = t.data
+        if a.mem_off and t.name.endswith(".bifrost_mix_b"):
+            data = np.full_like(np.asarray(data), -30.0)      # sigmoid(-30) ≈ 1e-13
+        w.write_tensor_data(data, tensor_endianess=r.endianess)
     w.close()
-    print(f"yazıldı: {a.out} ({len(r.tensors) - len(tensors)} Bifrost tensörü çıkarıldı)")
+    print(f"yazıldı: {a.out} ({len(r.tensors) - len(tensors)} Bifrost tensörü çıkarıldı"
+          f"{', hafıza kapalı' if a.mem_off else ''})")
 
 
 if __name__ == "__main__":

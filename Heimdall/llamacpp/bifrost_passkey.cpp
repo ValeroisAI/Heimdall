@@ -77,7 +77,7 @@ int main(int argc, char ** argv) {
         }
         std::string out;
         int pos = p.size();
-        for (int s = 0; s < 8; ++s) {   // greedy
+        for (int s = 0; s < 24; ++s) {  // greedy; the answer may be wrapped ("The pass key is **12345**")
             const float * l = llama_get_logits_ith(ctx, -1);
             int best = 0; for (int v = 1; v < n_vocab; ++v) if (l[v] > l[best]) best = v;
             char buf[64]; int k = llama_token_to_piece(vocab, best, buf, sizeof(buf), 0, false);
@@ -87,7 +87,10 @@ int main(int argc, char ** argv) {
             if (llama_decode(ctx, b)) return 1;
             llama_batch_free(b);
         }
-        const bool ok = out.find(std::to_string(key)) != std::string::npos;
+        // first run of digits in the answer must be exactly the key
+        std::string num; size_t i0 = out.find_first_of("0123456789");
+        if (i0 != std::string::npos) { size_t i1 = out.find_first_not_of("0123456789", i0); num = out.substr(i0, i1 - i0); }
+        const bool ok = num == std::to_string(key);
         ok_all += ok; ++n_all;
         std::string shown = out; for (char & c : shown) if (c == '\n') c = ' ';
         printf("bağlam %6zu  derinlik %.2f  parola %d  cevap \"%s\"  %s\n", p.size(), d, key, shown.c_str(), ok ? "DOĞRU" : "yanlış");
