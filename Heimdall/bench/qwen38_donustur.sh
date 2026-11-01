@@ -20,6 +20,7 @@
 #   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
 #   ADIM=llamaprofil  bash bench/qwen38_donustur.sh   # Vulkan op süreleri (ORIJ=orijinal.gguf ile karşılaştırma)
 #   ADIM=llamakeep    bash bench/qwen38_donustur.sh   # 3 katmanı daha tam dikkate döndür (KEEP4=15,31,47), hız + PPL karşılaştır
+#   ADIM=llamaparola  bash bench/qwen38_donustur.sh   # parola testi 8K/32K/64K: 15/1, 12/4, orijinal (KV q8_0)
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -117,9 +118,19 @@ case $ADIM in
               $LLAMA/build/bin/llama-bench -m $m -ngl 99 -fa 1 -ctk $t -ctv $t -p 512 -n 64 -d ${DERIN:-0,32768,131072} 2>&1 | grep -E "^\| qwen" || true
             done
           done ;;
+  llamaparola)
+          [ -x $LLAMA/build/bin/bifrost_passkey ] || g++ -O2 -std=c++17 llamacpp/bifrost_passkey.cpp -I$LLAMA/include \
+            -I$LLAMA/ggml/include -L$LLAMA/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$LLAMA/build/bin -o $LLAMA/build/bin/bifrost_passkey
+          for m in $OUT/q38-27b-bifrost-$QUANT.gguf $OUT/q38-27b-bifrost-k4-$QUANT.gguf ${ORIJ:-}; do
+            [ -f $m ] || continue
+            echo "== $m"
+            NGL=99 CTK=${CTK:-q8_0} CTV=${CTV:-q8_0} $LLAMA/build/bin/bifrost_passkey $m ${PAROLA_L:-8192,32768,65536} 0.1,0.5,0.9 2 2>/dev/null || true
+          done
+          echo "== 131K neden düştü: 12/4, KV q4_0"
+          $LLAMA/build/bin/llama-bench -m $OUT/q38-27b-bifrost-k4-$QUANT.gguf -ngl 99 -fa 1 -ctk q4_0 -ctv q4_0 -p 0 -n 16 -d 131072 2>&1 | tail -6 || true ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | sunucu)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | sunucu)"; exit 1 ;;
 esac

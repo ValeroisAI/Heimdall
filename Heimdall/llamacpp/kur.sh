@@ -52,4 +52,6 @@ g++ -O2 -std=c++17 "$HERE/bifrost_logits.cpp" -Iinclude -Iggml/include -Lbuild/b
     -Wl,-rpath,"$PWD/build/bin" -o build/bin/bifrost_logits
 g++ -O2 -std=c++17 "$HERE/bifrost_multiseq.cpp" -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base \
     -Wl,-rpath,"$PWD/build/bin" -o build/bin/bifrost_multiseq
+g++ -O2 -std=c++17 "$HERE/bifrost_passkey.cpp" -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base \
+    -Wl,-rpath,"$PWD/build/bin" -o build/bin/bifrost_passkey
 echo "hazır: $DIR/build/bin (llama-cli, llama-server, llama-quantize, llama-bench, bifrost_logits)"
