@@ -19,6 +19,7 @@
 #   ADIM=llamasohbet  bash bench/qwen38_donustur.sh   # llama-cli ile sohbet (bağlam $CTX)
 #   ADIM=llamabench   bash bench/qwen38_donustur.sh   # hız: boş bağlam ↔ 32K dolu bağlam (sabit kalmalı)
 #   ADIM=llamaprofil  bash bench/qwen38_donustur.sh   # Vulkan op süreleri (ORIJ=orijinal.gguf ile karşılaştırma)
+#   ADIM=llamakeep    bash bench/qwen38_donustur.sh   # 3 katmanı daha tam dikkate döndür (KEEP4=15,31,47), hız + PPL karşılaştır
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -102,9 +103,23 @@ case $ADIM in
               | awk -F' us = ' '{split($2,a," "); printf "%10.1f us  %s\n", a[1], $1}' | sort -gr | head -40
             tac $OUT/vkperf.log | grep -m1 'Total time'
           done ;;
+  llamakeep)   # yeniden eğitim yok: katmanlar bağımsız eğitildi, yalnız dönüşümleri kapatılır
+          K=$OUT/q38-27b-bifrost-k4-$QUANT.gguf
+          [ -f $K ] || $PY llamacpp/bifrost_keep.py --in $OUT/q38-27b-bifrost-$QUANT.gguf --out $K --keep ${KEEP4:-15,31,47} --llama $LLAMA
+          for m in $OUT/q38-27b-bifrost-$QUANT.gguf $K ${ORIJ:-}; do
+            echo "== $m"
+            $LLAMA/build/bin/llama-perplexity -m $m -f veri/wiki_test.txt -ngl 99 -c 8192 --chunks 8 2>&1 | grep "Final estimate" || true
+          done
+          echo "== $K, KV q4_0"
+          $LLAMA/build/bin/llama-perplexity -m $K -f veri/wiki_test.txt -ngl 99 -c 8192 --chunks 8 -fa on -ctk q4_0 -ctv q4_0 2>&1 | grep "Final estimate" || true
+          for t in q8_0 q4_0; do   # orijinal 131K'da sığmazsa o satır hata verir, diğerleri yine ölçülür
+            for m in $K ${ORIJ:-}; do
+              $LLAMA/build/bin/llama-bench -m $m -ngl 99 -fa 1 -ctk $t -ctv $t -p 512 -n 64 -d ${DERIN:-0,32768,131072} 2>&1 | grep -E "^\| qwen" || true
+            done
+          done ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | sunucu)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | sunucu)"; exit 1 ;;
 esac
