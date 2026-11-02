@@ -125,7 +125,7 @@ _TEMPLATES = (
 )
 
 
-def recall_sequence(tok, data, t: int, rng, n_facts: int = 12) -> np.ndarray:
+def recall_sequence(tok, data, t: int, rng, n_facts: int = 12, spans: bool = False):
     s = int(rng.integers(0, len(data) - t - 1))
     seq = np.array(data[s:s + t], dtype=np.int64)
     facts = []
@@ -144,10 +144,11 @@ def recall_sequence(tok, data, t: int, rng, n_facts: int = 12) -> np.ndarray:
         slots = np.sort(rng.choice(room(lo, hi), size=len(pieces), replace=False))
         for st_, x in zip(slots, pieces):
             seq[st_:st_ + len(x)] = x
+        return [(int(st_), len(x)) for st_, x in zip(slots, pieces)]
     place(4, early, [f for f, _ in facts])
     order = rng.permutation(n)
-    place(late, t - 2, [facts[i][1] for i in order])
-    return seq
+    q_spans = place(late, t - 2, [facts[i][1] for i in order])
+    return (seq, q_spans) if spans else seq     # q_spans: (start, length) of every question + answer
 
 
 def calib_ids(path, vocab: int, n: int, t: int, seed: int, tok=None, synth: float = 0.0) -> torch.Tensor:

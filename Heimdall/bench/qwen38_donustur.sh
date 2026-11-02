@@ -27,6 +27,11 @@
 #   ADIM=a2           bash bench/qwen38_donustur.sh   # 27B aşama A v2 → $OUT2 (varsayılan runs/q38_h2), KEEP2 global kalır
 #   ADIM=a2test       bash bench/qwen38_donustur.sh   # a2 sonrası: GGUF + parola + PPL + hız
 #   ADIM=a2parola     bash bench/qwen38_donustur.sh   # parola: v2 ↔ v2 hafızasız ↔ orijinal (ORIJ=...), sınırsız cevap
+#
+#   Eğitim motoru (heimdall/motor.py: uzun dizi, öğretmen bir kez, parça parça tam gradyan):
+#   ADIM=motorprova   bash bench/qwen38_donustur.sh   # 0.8B, 16K dizi, hepsi dönüşür: parola (hafıza açık/kapalı) + PPL
+#   ADIM=motor        bash bench/qwen38_donustur.sh   # 27B → $OUT3 (runs/q38_m1), 64K dizi, 12/4; MOTOR_ARGS ile ayar
+#   ADIM=motortest    bash bench/qwen38_donustur.sh   # motor sonrası: GGUF + parola (açık/kapalı) + PPL + hız
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -59,6 +64,7 @@ CTX=${CTX:-131072}
 DERIN=${DERIN:-0,32768}      # llamabench bağlam dolulukları (ör. 0,32768,65536,131072)
 GGUF_TIP=${GGUF_TIP:-q8_0}
 OUT2=${OUT2:-runs/q38_h2}
+OUT3=${OUT3:-runs/q38_m1}
 KEEP2=${KEEP2:-layers.15 layers.31 layers.47 layers.63}   # 12/4: 4 tam dikkat katmanı kalır
 pk() {   # parola testi: model, bağlamlar
   [ -x $LLAMA/build/bin/bifrost_passkey ] && [ llamacpp/bifrost_passkey.cpp -ot $LLAMA/build/bin/bifrost_passkey ] || \
@@ -195,9 +201,27 @@ case $ADIM in
           pk $G $L
           echo "-- hafıza kapalı (BIFROST_MEM_OFF=1, aynı dosya)"; BIFROST_MEM_OFF=1 pk $G $L
           [ -n "${ORIJ:-}" ] && pk $ORIJ $L ;;
+  motorprova)
+          M=Qwen/Qwen3.5-0.8B; HFM=$(hf_dir $M); V=veri/qwen_wiki_prova; O=runs/q35_08b_m1
+          [ -f $V/wiki_train.bin ] || $H hazirla --model $M --veri $V --tokens 5e6
+          [ -f $O/donusum_param.pt ] && [ ! -f $O/motor_durum.json ] || $PY -m heimdall.motor egit --model $M \
+            --train $V/wiki_train.bin --out $O --window 256 --seq ${SEQM:-16384} --kalib 16 --keep-every 0 \
+            --adim 300 ${DEVAM:+--devam}
+          $PY bench/bifrost_param_ozet.py $O/donusum_param.pt
+          [ -f $O/bifrost-f16.gguf ] || $PY llamacpp/bifrost_gguf.py --model $HFM --conv $O/donusum_param.pt \
+            --llama $LLAMA --outtype f16 --out $O/bifrost-f16.gguf >/dev/null 2>&1
+          L=${PAROLA_L:-1024,2048,4096,8192,16384}
+          pk $O/bifrost-f16.gguf $L
+          echo "-- hafıza kapalı"; BIFROST_MEM_OFF=1 pk $O/bifrost-f16.gguf $L
+          $LLAMA/build/bin/llama-perplexity -m $O/bifrost-f16.gguf -f veri/wiki_test.txt -ngl 99 -c 4096 --chunks 8 \
+            2>&1 | grep "Final estimate" || true ;;
+  motor)  $PY -m heimdall.motor egit --model $MODEL --train $VERI/wiki_train.bin --out $OUT3 --window $PENCERE \
+            ${MOTOR_ARGS:-} ${DEVAM:+--devam} ;;
+  motortest)
+          OUT2=$OUT3 ADIM=a2test bash "$SELF" && OUT2=$OUT3 ADIM=a2parola bash "$SELF" ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | provahafiza | a2 | a2test | a2parola | sunucu)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | provahafiza | a2 | a2test | a2parola | motorprova | motor | motortest | sunucu)"; exit 1 ;;
 esac
