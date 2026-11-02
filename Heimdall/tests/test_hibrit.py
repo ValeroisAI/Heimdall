@@ -255,13 +255,14 @@ def test_retrieval_mask_reference():
         for i in range(t):
             p = n - t + i
             blocks = [b for b in range((n - S) // L) if S + (b + 1) * L <= p - W + 1]
+            nc = len(blocks)
             ub = {b: max(sum(max(qr[0, h, i, d] * kr[0, g, S + b * L:S + (b + 1) * L, d].min(),
                                  qr[0, h, i, d] * kr[0, g, S + b * L:S + (b + 1) * L, d].max()) for d in range(D))
                          for h in range(g * R, (g + 1) * R)) for b in blocks}
             top = sorted(blocks, key=lambda b: -ub[b])[:2]
             want = torch.zeros(n, dtype=torch.bool)
             want[:S] = True
-            want[p - W + 1:p + 1] = True
+            want[S + nc * L:p + 1] = True
             for b in top:
                 want[S + b * L:S + (b + 1) * L] = True
             for h in range(g * R, (g + 1) * R):

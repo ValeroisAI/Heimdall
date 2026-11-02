@@ -82,6 +82,25 @@ Correctness after the speed work:
   (3,61,1,1,200,2,100), all single tokens, and chunks that straddle the window.
 * Two sequences decoded together (B=2) match decoding them one at a time (9.5e-6).
 
+## Retrieval attention for the kept full-attention layers (`BIFROST_RET`)
+
+The layers left as full attention (Qwen's own, or the kept ones of a 12/4 conversion) can read only part of their
+KV cache at decode: the sinks, the recent window, and the `k` key blocks whose upper bound on q·k is highest
+(per KV head; per-block key max/min kept next to the KV cache, Quest-style). The softmax over those tokens is exact.
+No training; it works on the original model too.
+
+    BIFROST_RET=16,2048,64,4 FA=1 bifrost_passkey model.gguf 32768,65536     # k, window, block, sinks
+
+* Only single-token decode uses it; the prompt is read with full attention. It turns on once a position has at
+  least `k` blocks before its window.
+* Each attention layer then reads about `sinks + window + block + k*block` tokens per step (here ~3.1K) plus the
+  block summary (f32 max and min per 64-token block: 1/16 of an f16 K cache), instead of the whole context.
+* It needs flash attention (V not transposed) and one sequence whose cells are its positions (a fresh or cleared
+  cache, no context shift). Saved session state does not include the summaries.
+* The KV cache still sits on the GPU. Keeping it in host RAM and copying only the picked blocks is the next step.
+* Reference: `heimdall/hibrit.py` (`HybridAttention.set_retrieval`); `bench/erisim_parola.py` compares pass-key
+  recall with full attention, window-only and retrieval.
+
 ## Not done / not verified
 
 * **Vulkan is verified only on lavapipe (software).** Speed on a real GPU is not measured yet. The CUDA/HIP 256 kernel case is

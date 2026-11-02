@@ -280,7 +280,7 @@ class HybridAttention(nn.Module):
             cache["k"], cache["v"] = kr, vt
         t, n = qr.size(2), kr.size(2)
         ret = getattr(self, "retrieval", None)
-        if ret is not None and (t == 1 or ret.get("prefill")) and n > ret["sinks"] + ret["window"] + ret["k"] * ret["block"]:
+        if ret is not None and (t == 1 or ret.get("prefill")) and n - ret["sinks"] - ret["window"] >= ret["k"] * ret["block"]:
             o = F.scaled_dot_product_attention(qr, kr, vt, attn_mask=self._retrieval_mask(qr, kr, ret), enable_gqa=True)
         elif t == n:
             o = F.scaled_dot_product_attention(qr, kr, vt, is_causal=True, enable_gqa=True)
@@ -292,7 +292,7 @@ class HybridAttention(nn.Module):
     def set_retrieval(self, k: Optional[int] = 16, block: int = 64, window: int = 2048, sinks: int = 4,
                       prefill: bool = False):
         """Retrieval attention for a full-attention layer: each query attends exactly (softmax) to the sinks, the
-        recent window and the k key blocks with the highest upper bound on q·k, per KV head (Quest-style per-block
+        recent window (from the block boundary at or before pos - window + 1) and the k key blocks with the highest upper bound on q·k, per KV head (Quest-style per-block
         key min/max). Only those ~sinks + window + k*block tokens need to be on the GPU; the rest can stay in host
         RAM. prefill=False applies it to single-token decode only (the prompt is read with full attention).
         k=0 keeps only the sinks and the window (baseline); k=None turns it off."""
@@ -310,16 +310,17 @@ class HybridAttention(nn.Module):
         ub = q.clamp(min=0) @ kmax[:, :, None].transpose(-1, -2) + q.clamp(max=0) @ kmin[:, :, None].transpose(-1, -2)
         ub = ub.amax(2)                                     # [B, G, t, nb]: one selection per KV head
         qpos = torch.arange(n - t, n, device=dev)
-        bstart = S + torch.arange(nb, device=dev) * L
-        # candidates: blocks that start before the window of their query (the window covers the rest)
-        cand = bstart[None] + L <= (qpos - W + 1)[:, None]  # [t, nb]
+        # candidates: the nc blocks that end before the window; the window starts at the next block boundary, so it
+        # holds W to W + L - 1 tokens and no token falls between the candidates and the window
+        nc = ((qpos - W + 1 - S).clamp(min=0) // L).clamp(max=nb)                     # [t]
+        cand = torch.arange(nb, device=dev)[None] < nc[:, None]                      # [t, nb]
         ub = ub.masked_fill(~cand, float("-inf"))
         top = ub.topk(min(K, nb), dim=-1).indices          # [B, G, t, K]  (k=0: empty, window only)
         sel = torch.zeros(B, G, t, nb, dtype=torch.bool, device=dev).scatter_(-1, top, True) & cand
         tok = torch.zeros(B, G, t, n, dtype=torch.bool, device=dev)
         tok[..., S:S + nb * L] = sel.repeat_interleave(L, dim=-1)
         pos = torch.arange(n, device=dev)
-        base = (pos[None] < S) | ((pos[None] > (qpos - W)[:, None]) & (pos[None] <= qpos[:, None]))   # [t, n]
+        base = (pos[None] < S) | ((pos[None] >= (S + nc * L)[:, None]) & (pos[None] <= qpos[:, None]))   # [t, n]
         return (tok | base).repeat_interleave(R, dim=1)
 
     # ------------------------------------------------------------------ öğrenci (eğitim ve çıkarım AYNI yol)

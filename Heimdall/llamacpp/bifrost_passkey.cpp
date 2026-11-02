@@ -2,7 +2,7 @@
 //   NGL=99 bifrost_passkey model.gguf 8192,32768,65536 [derinlikler 0.1,0.5,0.9] [deneme 2]
 // Her bağlam × derinlik × deneme için bir satır, sonunda doğruluk (sıkı: ilk sayı parola; esnek: cevapta geçiyor).
 // Model parola görünene, sırasını bitirene ya da MAX_NEW (512) token'a kadar üretir.
-// Ortam: NGL, CTK/CTV (KV tipi: f16, q8_0, q4_0), MAX_NEW.
+// Ortam: NGL, CTK/CTV (KV tipi: f16, q8_0, q4_0), MAX_NEW, FA=1; BIFROST_RET="k,pencere,blok,çapa" erişimli dikkat.
 #include "llama.h"
 #include <cstdio>
 #include <cstdlib>
@@ -48,7 +48,9 @@ int main(int argc, char ** argv) {
     auto cp = llama_context_default_params();
     cp.n_ctx = max_len + 256; cp.n_batch = 512; cp.n_ubatch = 512; cp.n_seq_max = 1;
     cp.type_k = kv_type("CTK"); cp.type_v = kv_type("CTV");
-    if (cp.type_k != GGML_TYPE_F16 || cp.type_v != GGML_TYPE_F16) cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    // quantized KV and BIFROST_RET (retrieval attention) need flash attention (V not transposed); FA=1 forces it
+    if (cp.type_k != GGML_TYPE_F16 || cp.type_v != GGML_TYPE_F16 || getenv("BIFROST_RET") || (getenv("FA") && atoi(getenv("FA"))))
+        cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "bağlam kurulamadı (bellek?)\n"); return 1; }
     const int n_vocab = llama_vocab_n_tokens(vocab);

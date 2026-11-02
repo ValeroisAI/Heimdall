@@ -21,6 +21,7 @@ int main(int argc, char ** argv) {
     if (!model) { fprintf(stderr, "model yüklenemedi\n"); return 1; }
     auto cp = llama_context_default_params();
     cp.n_ctx = getenv("N_CTX") ? atoi(getenv("N_CTX")) : toks.size() + 16; cp.n_batch = 512; cp.n_ubatch = 512; cp.n_seq_max = 1;
+    if (getenv("FA") && atoi(getenv("FA"))) cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;   // BIFROST_RET needs it (V not transposed)
     llama_context * ctx = llama_init_from_model(model, cp);
     if (!ctx) { fprintf(stderr, "bağlam kurulamadı\n"); return 1; }
     const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
