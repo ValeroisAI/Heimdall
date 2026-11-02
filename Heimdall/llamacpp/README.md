@@ -104,6 +104,9 @@ No training; it works on the original model too.
 * Pass-key recall, original Qwen3.5-0.8B (6 full-attention layers), PyTorch, 8K and 16K, depths 0.1/0.5/0.9, one
   key each: full attention 6/6, window 512 only 0/6, window 512 + 16 blocks 6/6, and 6/6 also when the prompt is
   read with retrieval (each prompt token sees ~1.5K tokens). Small sample; 27B and 64K+ not measured yet.
+* Decode speed, same model in llama.cpp (CPU, 4 threads, f32, `llama-bench -fa 1 -n 32`): at 8K 13.8 tok/s without,
+  14.1 with `BIFROST_RET=16,512,64,4`; at 32K 9.3 without, 14.1 with: the step no longer slows down with context.
+  On a GPU the attention share of a step is smaller for a 27B model; not measured yet.
 * Reference: `heimdall/hibrit.py` (`HybridAttention.set_retrieval`); `bench/erisim_parola.py` compares pass-key
   recall with full attention, window-only and retrieval.
 
