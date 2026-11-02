@@ -189,7 +189,9 @@ def head_topk(hn, lm_head, k: int, chunk: int = 32768):
         z = F.linear(hn, lm_head.weight[r:r + chunk].to(hn.dtype)).float()            # [T, c]
         m = z.amax(-1, keepdim=True)
         part = (z - m).exp().sum(-1, keepdim=True).log() + m
-        lse = part if lse is None else torch.maximum(lse, part) + (-(lse - part).abs()).exp().log1p()
+        if lse is not None:   # logaddexp with where + elementwise ops (torch.maximum: no gfx1201 kernel in some wheels)
+            part = torch.where(lse > part, lse, part) + (-(lse - part).abs()).exp().log1p()
+        lse = part
         v, i = topk_basic(z, k)
         i = i + r
         if best_v is not None:
@@ -350,6 +352,9 @@ def cmd_asama_a(args) -> None:
         torch.save(H.cpu(), h_file)
         log(f"son gizli durumlar kaydedildi: {h_file} ({gb(H.numel() * H.element_size())})")
 
+    if args.topk <= 0:   # aşama B koşulmayacaksa öğretmen top-k ve MTP gerekmez
+        log("--topk 0: öğretmen top-k ve MTP dönüşümü atlandı (aşama B için gerekir)")
+        return
     # öğretmen (bf16) top-k olasılıkları: aşama B'nin hedefi
     with torch.device("meta"):
         head = nn.ModuleDict({"norm": ZNorm(c.d, c.eps), "lm_head": nn.Linear(c.d, c.vocab, bias=False)})

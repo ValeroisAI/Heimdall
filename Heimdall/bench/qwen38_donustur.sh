@@ -169,7 +169,7 @@ case $ADIM in
           done ;;
   a2)     $H asama-a --model $MODEL --train $VERI/wiki_train.bin --out $OUT2 --window $PENCERE --kalib ${KALIB2:-32} \
             --seq-len ${SEQ2:-8192} --steps ${ADIMA2:-300} --sentetik ${SENT:-0.25} --mem-init long \
-            --keep-global $KEEP2 ${DEVAM:+--devam} ;;
+            --keep-global $KEEP2 --topk ${TOPK2:-0} ${DEVAM:+--devam} ;;
   a2test)
           [ -f $OUT2/q38-27b-h2-$GGUF_TIP.gguf ] || [ -f $OUT2/q38-27b-h2-$QUANT.gguf ] || \
             $PY llamacpp/bifrost_gguf.py --model "$(hf_dir $MODEL)" --conv $OUT2/donusum_param.pt --llama $LLAMA \
