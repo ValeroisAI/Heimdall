@@ -26,6 +26,7 @@
 #   ADIM=provahafiza  bash bench/qwen38_donustur.sh   # 0.8B: v1 ↔ v2 ↔ v2 hafızasız ↔ orijinal (parola + PPL), ~30-60 dk
 #   ADIM=a2           bash bench/qwen38_donustur.sh   # 27B aşama A v2 → $OUT2 (varsayılan runs/q38_h2), KEEP2 global kalır
 #   ADIM=a2test       bash bench/qwen38_donustur.sh   # a2 sonrası: GGUF + parola + PPL + hız
+#   ADIM=a2parola     bash bench/qwen38_donustur.sh   # parola: v2 ↔ v2 hafızasız ↔ orijinal (ORIJ=...), sınırsız cevap
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -188,9 +189,13 @@ case $ADIM in
             -fa on -ctk q8_0 -ctv q8_0 2>&1 | grep "Final estimate" || true
           $LLAMA/build/bin/llama-bench -m $OUT2/q38-27b-h2-$QUANT.gguf -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 512 -n 64 \
             -d ${DERIN:-0,32768,131072} 2>&1 | grep -E "^\| qwen" || true ;;
+  a2parola)
+          G=$OUT2/q38-27b-h2-$QUANT.gguf
+          [ -f ${G%.gguf}-memoff.gguf ] || $PY llamacpp/bifrost_keep.py --in $G --out ${G%.gguf}-memoff.gguf --mem-off --llama $LLAMA
+          for m in $G ${G%.gguf}-memoff.gguf ${ORIJ:-}; do pk $m ${PAROLA_L:-8192,32768,65536}; done ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
             && ADIM=b bash "$SELF" && ADIM=test bash "$SELF"; } 2>&1 | tee -a $OUT/gece.log ;;
-  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | provahafiza | a2 | a2test | sunucu)"; exit 1 ;;
+  *)      echo "bilinmeyen ADIM=$ADIM (prova | plan | veri | a | test | b | sohbet | gguf | gece | llama | llamaprova | llamagguf | llamasohbet | llamabench | llamaprofil | llamakeep | llamaparola | provahafiza | a2 | a2test | a2parola | sunucu)"; exit 1 ;;
 esac

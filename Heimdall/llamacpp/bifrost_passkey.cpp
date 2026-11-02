@@ -1,6 +1,8 @@
 // bifrost_passkey: uzun dolgu metnin içine gömülü 5 haneli parolayı birebir geri isteme testi (greedy).
 //   NGL=99 bifrost_passkey model.gguf 8192,32768,65536 [derinlikler 0.1,0.5,0.9] [deneme 2]
-// Her bağlam × derinlik × deneme için bir satır, sonunda doğruluk. Ortam: NGL, CTK/CTV (KV tipi: f16, q8_0, q4_0).
+// Her bağlam × derinlik × deneme için bir satır, sonunda doğruluk (sıkı: ilk sayı parola; esnek: cevapta geçiyor).
+// Model parola görünene, sırasını bitirene ya da MAX_NEW (512) token'a kadar üretir.
+// Ortam: NGL, CTK/CTV (KV tipi: f16, q8_0, q4_0), MAX_NEW.
 #include "llama.h"
 #include <cstdio>
 #include <cstdlib>
@@ -52,7 +54,8 @@ int main(int argc, char ** argv) {
     const int n_vocab = llama_vocab_n_tokens(vocab);
 
     srand(1234);
-    int ok_all = 0, n_all = 0;
+    int ok_all = 0, found_all = 0, n_all = 0;
+    const int max_new = getenv("MAX_NEW") ? atoi(getenv("MAX_NEW")) : 512;
     for (double L : lens) for (double d : depths) for (int tr = 0; tr < trials; ++tr) {
         const int key = 10000 + rand() % 90000;
         const std::string needle = "The pass key is " + std::to_string(key) + ". Remember it. " + std::to_string(key) + " is the pass key.\n";
@@ -77,9 +80,13 @@ int main(int argc, char ** argv) {
         }
         std::string out;
         int pos = p.size();
-        for (int s = 0; s < 24; ++s) {  // greedy; the answer may be wrapped ("The pass key is **12345**")
+        // greedy until the key appears, the model ends its turn, or max_new tokens (it may think first)
+        const std::string ks = std::to_string(key);
+        int n_gen = 0;
+        for (; n_gen < max_new && out.find(ks) == std::string::npos; ++n_gen) {
             const float * l = llama_get_logits_ith(ctx, -1);
             int best = 0; for (int v = 1; v < n_vocab; ++v) if (l[v] > l[best]) best = v;
+            if (llama_vocab_is_eog(vocab, best)) break;
             char buf[64]; int k = llama_token_to_piece(vocab, best, buf, sizeof(buf), 0, false);
             out.append(buf, std::max(k, 0));
             llama_batch b = llama_batch_init(1, 0, 1);
@@ -90,13 +97,16 @@ int main(int argc, char ** argv) {
         // first run of digits in the answer must be exactly the key
         std::string num; size_t i0 = out.find_first_of("0123456789");
         if (i0 != std::string::npos) { size_t i1 = out.find_first_not_of("0123456789", i0); num = out.substr(i0, i1 - i0); }
-        const bool ok = num == std::to_string(key);
-        ok_all += ok; ++n_all;
+        const bool ok = num == ks;                                   // strict: the first number is the key
+        const bool found = out.find(ks) != std::string::npos;         // lenient: the key appears somewhere
+        ok_all += ok; found_all += found; ++n_all;
         std::string shown = out; for (char & c : shown) if (c == '\n') c = ' ';
-        printf("bağlam %6zu  derinlik %.2f  parola %d  cevap \"%s\"  %s\n", p.size(), d, key, shown.c_str(), ok ? "DOĞRU" : "yanlış");
+        if (shown.size() > 160) shown = shown.substr(0, 70) + " … " + shown.substr(shown.size() - 70);
+        printf("bağlam %6zu  derinlik %.2f  parola %d  %3d token  cevap \"%s\"  %s\n", p.size(), d, key, n_gen,
+               shown.c_str(), ok ? "DOĞRU" : found ? "DOĞRU (düşündükten sonra)" : "yanlış");
         fflush(stdout);
     }
-    printf("doğruluk: %d / %d\n", ok_all, n_all);
+    printf("doğruluk: sıkı (ilk sayı) %d / %d | esnek (cevapta geçiyor) %d / %d\n", ok_all, n_all, found_all, n_all);
     llama_free(ctx); llama_model_free(model); llama_backend_free();
     return 0;
 }
