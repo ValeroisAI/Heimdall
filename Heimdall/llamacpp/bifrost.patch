@@ -449,22 +449,23 @@ index 9a8602b..0961a59 100644
          llm_graph_input_attn_kv * inp_attn,
                      ggml_tensor * cur,
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index 8a4e434..1992e5e 100644
+index 8a4e434..28f4449 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -1,5 +1,11 @@
+@@ -1,5 +1,12 @@
  #include "models.h"
  #include "llama-memory-recurrent.h"
 +#include "llama-memory-hybrid.h"
 +
 +#include <algorithm>
++#include <cstdlib>
 +#include <array>
 +#include <cmath>
 +#include <vector>
  
  void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
      ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
-@@ -22,6 +28,22 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
+@@ -22,6 +29,22 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
          }
      }
  
@@ -487,7 +488,7 @@ index 8a4e434..1992e5e 100644
      switch (hparams.n_layer()) {
          case 24: type = hparams.n_embd == 1024 ? LLM_TYPE_0_8B : LLM_TYPE_2B; break;
          case 32: type = hparams.n_embd == 2560 ? LLM_TYPE_4B : LLM_TYPE_9B; break;
-@@ -67,7 +89,7 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+@@ -67,7 +90,7 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
          layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", il), { n_embd }, flags);
          layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", il), { n_embd }, flags);
  
@@ -496,7 +497,7 @@ index 8a4e434..1992e5e 100644
              // Attention layers
              create_tensor_qkv(layer, il, n_embd, n_embd_head_k * n_head * 2, n_embd_k_gqa, n_embd_v_gqa, flags);
              layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_embd_head_k * n_head, n_embd }, flags);
-@@ -75,6 +97,21 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+@@ -75,6 +98,21 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
              // Q/K normalization for attention layers
              layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { n_embd_head_k }, flags);
              layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", il), { n_embd_head_k }, flags);
@@ -518,7 +519,7 @@ index 8a4e434..1992e5e 100644
          } else {
              // Linear attention (gated delta net) specific tensors
              // Create tensors with calculated dimensions
-@@ -155,6 +192,38 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+@@ -155,6 +193,38 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
      ggml_tensor * inp_pos     = build_inp_pos();
      ggml_tensor * inp_out_ids = build_inp_out_ids();
  
@@ -557,7 +558,7 @@ index 8a4e434..1992e5e 100644
      // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
      for (int il = 0; il < n_layer; ++il) {
          res->t_layer_inp[il] = inpL;
-@@ -167,7 +236,10 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+@@ -167,7 +237,10 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
          ggml_build_forward_expand(gf, cur);
  
          // Determine layer type and build appropriate attention mechanism
@@ -569,7 +570,7 @@ index 8a4e434..1992e5e 100644
              // Linear attention layer (gated delta net)
              cur = build_layer_attn_linear(inp->get_recr(), cur, il);
          } else {
-@@ -661,3 +733,351 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -661,3 +734,355 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
  
      res->t_logits = cur;
  }
@@ -911,6 +912,10 @@ index 8a4e434..1992e5e 100644
 +    lse2 = ggml_scale_bias(ctx0, lse2, 1.0f, -logf((float) W));
 +    ggml_tensor * gamma = ggml_sigmoid(ctx0, ggml_add(ctx0, mix, ggml_mul(ctx0, lse2, bf.mix_lse)));
 +    gamma = ggml_mul(ctx0, gamma, bi->m_win);                                                           // [H, n]
++    static const bool mem_off = getenv("BIFROST_MEM_OFF") != nullptr;   // diagnosis: window + sinks only
++    if (mem_off) {
++        gamma = ggml_scale(ctx0, gamma, 0.0f);
++    }
 +
 +    ggml_tensor * ow = ggml_reshape_3d(ctx0, o_win, D, H, n_tokens);
 +    ggml_tensor * om = ggml_reshape_3d(ctx0, o_mem, D, H, n_tokens);

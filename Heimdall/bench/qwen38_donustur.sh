@@ -190,9 +190,11 @@ case $ADIM in
           $LLAMA/build/bin/llama-bench -m $OUT2/q38-27b-h2-$QUANT.gguf -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 512 -n 64 \
             -d ${DERIN:-0,32768,131072} 2>&1 | grep -E "^\| qwen" || true ;;
   a2parola)
-          G=$OUT2/q38-27b-h2-$QUANT.gguf
-          [ -f ${G%.gguf}-memoff.gguf ] || $PY llamacpp/bifrost_keep.py --in $G --out ${G%.gguf}-memoff.gguf --mem-off --llama $LLAMA
-          for m in $G ${G%.gguf}-memoff.gguf ${ORIJ:-}; do pk $m ${PAROLA_L:-8192,32768,65536}; done ;;
+          G=$OUT2/q38-27b-h2-$QUANT.gguf; L=${PAROLA_L:-8192,32768,65536}
+          rm -f ${G%.gguf}-memoff.gguf                      # eski yol (kopya): artık gerekmiyor
+          pk $G $L
+          echo "-- hafıza kapalı (BIFROST_MEM_OFF=1, aynı dosya)"; BIFROST_MEM_OFF=1 pk $G $L
+          [ -n "${ORIJ:-}" ] && pk $ORIJ $L ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \
