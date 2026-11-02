@@ -98,6 +98,9 @@ No training; it works on the original model too.
 * It needs flash attention (V not transposed) and one sequence whose cells are its positions (a fresh or cleared
   cache, no context shift). Saved session state does not include the summaries.
 * The KV cache still sits on the GPU. Keeping it in host RAM and copying only the picked blocks is the next step.
+* Verified (CPU, Qwen3.5-0.8B f32, `BIFROST_RET=4,256,64,4`, 500-token prefill then 352 single-token steps):
+  logits match the PyTorch reference within 9e-4 relative (max), the same top token at every step; retrieval
+  itself moves the logits by 5e-2 against full attention, so both picked the same blocks.
 * Reference: `heimdall/hibrit.py` (`HybridAttention.set_retrieval`); `bench/erisim_parola.py` compares pass-key
   recall with full attention, window-only and retrieval.
 
