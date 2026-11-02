@@ -101,6 +101,9 @@ No training; it works on the original model too.
 * Verified (CPU, Qwen3.5-0.8B f32, `BIFROST_RET=4,256,64,4`, 500-token prefill then 352 single-token steps):
   logits match the PyTorch reference within 9e-4 relative (max), the same top token at every step; retrieval
   itself moves the logits by 5e-2 against full attention, so both picked the same blocks.
+* Pass-key recall, original Qwen3.5-0.8B (6 full-attention layers), PyTorch, 8K and 16K, depths 0.1/0.5/0.9, one
+  key each: full attention 6/6, window 512 only 0/6, window 512 + 16 blocks 6/6, and 6/6 also when the prompt is
+  read with retrieval (each prompt token sees ~1.5K tokens). Small sample; 27B and 64K+ not measured yet.
 * Reference: `heimdall/hibrit.py` (`HybridAttention.set_retrieval`); `bench/erisim_parola.py` compares pass-key
   recall with full attention, window-only and retrieval.
 
