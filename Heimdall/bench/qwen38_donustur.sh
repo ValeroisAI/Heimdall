@@ -32,6 +32,7 @@
 #   ADIM=motorprova   bash bench/qwen38_donustur.sh   # 0.8B, 16K dizi, hepsi dönüşür: parola (hafıza açık/kapalı) + PPL
 #   ADIM=motor        bash bench/qwen38_donustur.sh   # 27B → $OUT3 (runs/q38_m1), 64K dizi, 12/4; MOTOR_ARGS ile ayar
 #   ADIM=motortest    bash bench/qwen38_donustur.sh   # motor sonrası: GGUF + parola (açık/kapalı) + PPL + hız
+#   ADIM=erisim       bash bench/qwen38_donustur.sh   # erişimli dikkat (BIFROST_RET) kapalı ↔ açık: parola + hız (ERISIM_M=model)
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
 #
 # Ortam: MODEL, OUT, VERI, PY, PENCERE (1024), KALIB (64), SEQ (4096), ADIMA (400), ADIMB (200)
@@ -201,6 +202,13 @@ case $ADIM in
           pk $G $L
           echo "-- hafıza kapalı (BIFROST_MEM_OFF=1, aynı dosya)"; BIFROST_MEM_OFF=1 pk $G $L
           [ -n "${ORIJ:-}" ] && pk $ORIJ $L ;;
+  erisim)   # tutulan tam dikkat katmanları: tüm KV ↔ çapa + pencere + en iyi 16 blok (BIFROST_RET=k,pencere,blok,çapa)
+          G=${ERISIM_M:-$OUT2/q38-27b-h2-$QUANT.gguf}; L=${PAROLA_L:-32768,65536}; R=${RET:-16,2048,64,4}
+          pk $G $L
+          echo "-- BIFROST_RET=$R"; BIFROST_RET=$R pk $G $L
+          for r in "" $R; do echo "-- hız, BIFROST_RET=${r:-kapalı}"
+            BIFROST_RET=$r $LLAMA/build/bin/llama-bench -m $G -ngl 99 -fa 1 -ctk ${CTK:-q8_0} -ctv ${CTV:-q8_0} \
+              -p 0 -n 64 -d ${DERIN:-32768,65536} 2>/dev/null | grep -E "tg64|error"; done ;;
   motorprova)
           M=Qwen/Qwen3.5-0.8B; HFM=$(hf_dir $M); V=veri/qwen_wiki_prova; O=runs/q35_08b_m1
           [ -f $V/wiki_train.bin ] || $H hazirla --model $M --veri $V --tokens 5e6
