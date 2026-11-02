@@ -171,6 +171,12 @@ case $ADIM in
             --seq-len ${SEQ2:-8192} --steps ${ADIMA2:-300} --sentetik ${SENT:-0.25} --mem-init long \
             --keep-global $KEEP2 --topk ${TOPK2:-0} ${DEVAM:+--devam} ;;
   a2test)
+          # taban: elde zaten olan nicemlenmiş Bifrost GGUF'u (yalnız Bifrost tensörleri değişir, ~13 GB, birkaç dakika)
+          BASE=${BASE:-$OUT/q38-27b-bifrost-$QUANT.gguf}
+          if [ ! -f $OUT2/q38-27b-h2-$QUANT.gguf ] && [ -f $BASE ]; then
+            $PY llamacpp/bifrost_gguf.py --base $BASE --conv $OUT2/donusum_param.pt --llama $LLAMA \
+              --out $OUT2/q38-27b-h2-$QUANT.gguf
+          fi
           [ -f $OUT2/q38-27b-h2-$GGUF_TIP.gguf ] || [ -f $OUT2/q38-27b-h2-$QUANT.gguf ] || \
             $PY llamacpp/bifrost_gguf.py --model "$(hf_dir $MODEL)" --conv $OUT2/donusum_param.pt --llama $LLAMA \
               --outtype $GGUF_TIP --out $OUT2/q38-27b-h2-$GGUF_TIP.gguf

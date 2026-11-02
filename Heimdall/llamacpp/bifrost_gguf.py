@@ -75,8 +75,11 @@ def main() -> None:
         new, window, sinks = tensors_from_conv(st)
 
         w = gguf.GGUFWriter(a.out, arch=arch)
+        # --base may itself be a Bifrost GGUF (e.g. the quantized one): its Bifrost keys and tensors are replaced, the
+        # teacher weights are copied as they are (no 29 GB intermediate, no requantization)
+        old = f"{arch}.bifrost."
         for field in r.fields.values():
-            if field.name == gguf.Keys.General.ARCHITECTURE or field.name.startswith("GGUF."):
+            if field.name == gguf.Keys.General.ARCHITECTURE or field.name.startswith(("GGUF.", old)):
                 continue
             vt = field.types[0]
             sub = field.types[-1] if vt == gguf.GGUFValueType.ARRAY else None
@@ -85,14 +88,15 @@ def main() -> None:
         w.add_uint32(f"{arch}.bifrost.sinks", sinks)
         w.add_array(f"{arch}.bifrost.layers", [1 if i in new else 0 for i in range(n_block)])
         extra = [(f"blk.{i}.{k}", v) for i in sorted(new) for k, v in new[i].items()]
-        for t in r.tensors:
+        tensors = [t for t in r.tensors if ".bifrost_" not in t.name]
+        for t in tensors:
             w.add_tensor_info(t.name, t.data.shape, t.data.dtype, t.data.nbytes, t.tensor_type)
         for name, v in extra:
             w.add_tensor_info(name, v.shape, v.dtype, v.nbytes)
         w.write_header_to_file()
         w.write_kv_data_to_file()
         w.write_ti_data_to_file()
-        for t in r.tensors:
+        for t in tensors:
             w.write_tensor_data(t.data, tensor_endianess=r.endianess)
         for _, v in extra:
             w.write_tensor_data(v)
