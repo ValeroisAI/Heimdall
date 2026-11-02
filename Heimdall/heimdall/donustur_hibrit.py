@@ -162,8 +162,26 @@ def calib_ids(path, vocab: int, n: int, t: int, seed: int, tok=None, synth: floa
 
 
 @torch.no_grad()
+def topk_basic(z, k: int):
+    """torch.topk without a sort/select kernel: k rounds of row max + compare + mask (amax and elementwise ops only).
+    Some ROCm wheels have no gfx1201 build of the topk kernels ("no kernel image" on RX 9070 XT). Ties: one index.
+    z: [T, c] float. Returns (values [T,k] descending, indices [T,k] long)."""
+    z = z.clone()
+    ar = torch.arange(z.size(-1), device=z.device, dtype=torch.float32)
+    vs, ix = [], []
+    for _ in range(min(k, z.size(-1))):
+        m = z.amax(-1, keepdim=True)
+        hit = z >= m
+        i = torch.where(hit, ar, torch.full_like(ar, -1.0)).amax(-1, keepdim=True)    # one index of the max
+        vs.append(m)
+        ix.append(i)
+        z.masked_fill_(ar == i, float("-inf"))
+    return torch.cat(vs, -1), torch.cat(ix, -1).long()
+
+
+@torch.no_grad()
 def head_topk(hn, lm_head, k: int, chunk: int = 32768):
-    """log_softmax'ın ilk k'sı, sözlük parça parça: yalnız matmul + max/exp/sum/topk (özel softmax çekirdeği yok).
+    """log_softmax'ın ilk k'sı, sözlük parça parça: yalnız matmul + max/exp/sum ve topk_basic (sort/topk çekirdeği yok).
     hn: [T, d]. Döndürür (log-olasılık [T,k], indeks [T,k])."""
     n = lm_head.weight.size(0)
     lse = best_v = best_i = None
@@ -172,10 +190,10 @@ def head_topk(hn, lm_head, k: int, chunk: int = 32768):
         m = z.amax(-1, keepdim=True)
         part = (z - m).exp().sum(-1, keepdim=True).log() + m
         lse = part if lse is None else torch.maximum(lse, part) + (-(lse - part).abs()).exp().log1p()
-        v, i = z.topk(min(k, z.size(-1)), -1)
+        v, i = topk_basic(z, k)
         i = i + r
         if best_v is not None:
-            v, j = torch.cat((best_v, v), -1).topk(k, -1)
+            v, j = topk_basic(torch.cat((best_v, v), -1), k)
             i = torch.cat((best_i, i), -1).gather(-1, j)
         best_v, best_i = v, i
     return best_v - lse, best_i
