@@ -226,3 +226,43 @@ def test_long_memory_init():
     life = math.log(2) / (a.A_log.exp() * torch.nn.functional.softplus(a.dt_bias))
     assert a.decay_mask[0] == 0 and torch.allclose(life, torch.logspace(math.log10(16), 6, TEXT["num_key_value_heads"]), rtol=1e-3)
     assert torch.allclose(a.mem_scale, torch.full_like(a.mem_scale, TEXT["head_dim"] ** 0.5))
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+def test_retrieval_all_blocks_equals_full(tiny_dir, prefill):
+    """k covering every block (or a window over the whole context) gives exactly full attention."""
+    m = HybridLM.load(tiny_dir).eval()
+    ids = torch.randint(0, 300, (1, 70))
+    with torch.no_grad():
+        ref = m(ids)
+        m.set_retrieval(k=100, block=4, window=8, sinks=2, prefill=prefill)
+        cache = m.new_cache()
+        outs = [m(ids[:, :40], cache)]
+        outs += [m(ids[:, i:i + 1], cache) for i in range(40, 70)]
+    assert (torch.cat(outs, 1) - ref).abs().max() < 1e-4
+
+
+def test_retrieval_mask_reference():
+    """The mask equals a direct per-query, per-KV-head selection: sinks + window + top-k blocks by upper bound."""
+    from heimdall.hibrit import HybridAttention
+    torch.manual_seed(0)
+    B, H, G, D, n, t = 1, 4, 2, 8, 50, 3
+    qr, kr = torch.randn(B, H, t, D), torch.randn(B, G, n, D)
+    ret = dict(k=2, block=4, window=6, sinks=2)
+    mask = HybridAttention._retrieval_mask(None, qr, kr, ret)
+    S, W, L, R = 2, 6, 4, H // G
+    for g in range(G):
+        for i in range(t):
+            p = n - t + i
+            blocks = [b for b in range((n - S) // L) if S + (b + 1) * L <= p - W + 1]
+            ub = {b: max(sum(max(qr[0, h, i, d] * kr[0, g, S + b * L:S + (b + 1) * L, d].min(),
+                                 qr[0, h, i, d] * kr[0, g, S + b * L:S + (b + 1) * L, d].max()) for d in range(D))
+                         for h in range(g * R, (g + 1) * R)) for b in blocks}
+            top = sorted(blocks, key=lambda b: -ub[b])[:2]
+            want = torch.zeros(n, dtype=torch.bool)
+            want[:S] = True
+            want[p - W + 1:p + 1] = True
+            for b in top:
+                want[S + b * L:S + (b + 1) * L] = True
+            for h in range(g * R, (g + 1) * R):
+                assert torch.equal(mask[0, h, i], want), (g, i)

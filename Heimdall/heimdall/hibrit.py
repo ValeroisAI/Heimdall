@@ -279,12 +279,48 @@ class HybridAttention(nn.Module):
                 kr, vt = torch.cat((cache["k"], kr), 2), torch.cat((cache["v"], vt), 2)
             cache["k"], cache["v"] = kr, vt
         t, n = qr.size(2), kr.size(2)
-        if t == n:
+        ret = getattr(self, "retrieval", None)
+        if ret is not None and (t == 1 or ret.get("prefill")) and n > ret["sinks"] + ret["window"] + ret["k"] * ret["block"]:
+            o = F.scaled_dot_product_attention(qr, kr, vt, attn_mask=self._retrieval_mask(qr, kr, ret), enable_gqa=True)
+        elif t == n:
             o = F.scaled_dot_product_attention(qr, kr, vt, is_causal=True, enable_gqa=True)
         else:
             mask = torch.arange(n, device=qr.device)[None] <= torch.arange(n - t, n, device=qr.device)[:, None]
             o = F.scaled_dot_product_attention(qr, kr, vt, attn_mask=mask, enable_gqa=True)
         return o.transpose(1, 2)
+
+    def set_retrieval(self, k: Optional[int] = 16, block: int = 64, window: int = 2048, sinks: int = 4,
+                      prefill: bool = False):
+        """Retrieval attention for a full-attention layer: each query attends exactly (softmax) to the sinks, the
+        recent window and the k key blocks with the highest upper bound on q·k, per KV head (Quest-style per-block
+        key min/max). Only those ~sinks + window + k*block tokens need to be on the GPU; the rest can stay in host
+        RAM. prefill=False applies it to single-token decode only (the prompt is read with full attention).
+        k=0 keeps only the sinks and the window (baseline); k=None turns it off."""
+        self.retrieval = None if k is None else dict(k=k, block=block, window=window, sinks=sinks, prefill=prefill)
+
+    def _retrieval_mask(self, qr, kr, ret):
+        """Boolean mask [B, H, t, n] (True = attend) for the last t queries over n keys."""
+        B, H, t, D = qr.shape
+        G, n, dev = kr.size(1), kr.size(2), qr.device
+        R, S, W, L, K = H // G, ret["sinks"], ret["window"], ret["block"], ret["k"]
+        nb = (n - S) // L                                   # full blocks after the sinks
+        kb = kr[:, :, S:S + nb * L].float().view(B, G, nb, L, D)
+        kmin, kmax = kb.amin(3), kb.amax(3)                 # [B, G, nb, D]  (the block summary kept on the GPU)
+        q = qr.float().view(B, G, R, t, D)
+        ub = q.clamp(min=0) @ kmax[:, :, None].transpose(-1, -2) + q.clamp(max=0) @ kmin[:, :, None].transpose(-1, -2)
+        ub = ub.amax(2)                                     # [B, G, t, nb]: one selection per KV head
+        qpos = torch.arange(n - t, n, device=dev)
+        bstart = S + torch.arange(nb, device=dev) * L
+        # candidates: blocks that start before the window of their query (the window covers the rest)
+        cand = bstart[None] + L <= (qpos - W + 1)[:, None]  # [t, nb]
+        ub = ub.masked_fill(~cand, float("-inf"))
+        top = ub.topk(min(K, nb), dim=-1).indices          # [B, G, t, K]  (k=0: empty, window only)
+        sel = torch.zeros(B, G, t, nb, dtype=torch.bool, device=dev).scatter_(-1, top, True) & cand
+        tok = torch.zeros(B, G, t, n, dtype=torch.bool, device=dev)
+        tok[..., S:S + nb * L] = sel.repeat_interleave(L, dim=-1)
+        pos = torch.arange(n, device=dev)
+        base = (pos[None] < S) | ((pos[None] > (qpos - W)[:, None]) & (pos[None] <= qpos[:, None]))   # [t, n]
+        return (tok | base).repeat_interleave(R, dim=1)
 
     # ------------------------------------------------------------------ öğrenci (eğitim ve çıkarım AYNI yol)
     def _mem_inputs(self, x, q, k, pos):
@@ -613,6 +649,12 @@ class HybridLM(nn.Module):
         for name, a in self.attn_modules():
             if name not in keep_global:
                 a.convert(window, sinks, n_archival(archival_frac, self.c.hkv, mem_init), mem_init)
+
+    def set_retrieval(self, **kw) -> None:
+        """Retrieval attention (HybridAttention.set_retrieval) on every full-attention layer that is not converted."""
+        for _, a in self.attn_modules():
+            if not a.converted:
+                a.set_retrieval(**kw)
 
     def set_mode(self, mode: str) -> None:
         for _, a in self.attn_modules():
