@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn.functional as F
 from tokenizers import Tokenizer
@@ -10,6 +11,7 @@ from tokenizers import Tokenizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+pytest.importorskip("lm_eval", reason="lm-evaluation-harness is not installed (pip install lm-eval)")
 import lmeval_heimdall as E  # noqa: E402
 from heimdall import HeimdallConfig, HeimdallLM, apply_arch  # noqa: E402
 from heimdall.io import DEFAULT_TOKENIZER  # noqa: E402

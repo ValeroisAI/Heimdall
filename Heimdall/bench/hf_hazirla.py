@@ -72,8 +72,8 @@ A {meta.get("params", 0) / 1e6:.0f}M-parameter language model trained from scrat
 (±1). It is a **base model**: no instruction tuning, no safety tuning. Expect fluent but often factually wrong text and repetition under greedy decoding.
 
 ## Important: these weights need the Heimdall model code
-The weights are released under **Apache-2.0**. The *model implementation* (needed to run them) lives in
-[{repo_hint}](https://github.com/{repo_hint}) under a **review-only license** until the architecture has been validated; it will be opened afterwards.
+The weights and the *model implementation* (needed to run them) are released under **Apache-2.0**; the code lives in
+[{repo_hint}](https://github.com/{repo_hint}).
 There is no `transformers` class and no GGUF export (the architecture is not supported by llama.cpp). Files: `model.safetensors` (bf16; the 1-bit
 FFN weights are stored as ±1 in bf16, not packed), `config.json`, `tokenizer.json` (8 192-token BPE), `meta.json`.
 
@@ -103,7 +103,7 @@ def main() -> None:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--lmeval", help="bench/lmeval_heimdall.py --out çıktısı (model kartındaki tablo için)")
-    p.add_argument("--repo", default="valeroisai/bifrost", help="kod deposu (kart bağlantısı)")
+    p.add_argument("--repo", default="valeroisai/heimdall", help="kod deposu (kart bağlantısı)")
     p.add_argument("--hf-repo", default="valeroisai/heimdall-bit-337m")
     a = p.parse_args()
     ckpt = torch.load(a.ckpt, map_location="cpu", weights_only=False)

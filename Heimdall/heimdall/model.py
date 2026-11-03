@@ -253,6 +253,20 @@ class Block(nn.Module):
         return x + self.ffn(self.norm2(x))
 
 
+class MTPModule(nn.Module):
+    """h' = Blok(W [norm(emb(x_{i+k})) ; norm(h_i)]), çıkış normu + paylaşılan lm_head → x_{i+k+1}."""
+
+    def __init__(self, cfg: HeimdallConfig) -> None:
+        super().__init__()
+        self.norm_e, self.norm_h = RMSNorm(cfg.d_model, cfg.norm_eps), RMSNorm(cfg.d_model, cfg.norm_eps)
+        self.fc = nn.Linear(2 * cfg.d_model, cfg.d_model, bias=False)
+        self.block = Block(cfg, "D")
+        self.norm = RMSNorm(cfg.d_model, cfg.norm_eps)
+
+    def forward(self, e, h):
+        return self.block(self.fc(torch.cat((self.norm_e(e), self.norm_h(h)), -1)))
+
+
 class HeimdallLM(nn.Module):
     def __init__(self, cfg: HeimdallConfig) -> None:
         super().__init__()
@@ -261,6 +275,7 @@ class HeimdallLM(nn.Module):
         self.blocks = nn.ModuleList([Block(cfg, kind) for kind in cfg.kinds])
         self.norm = RMSNorm(cfg.d_model, cfg.norm_eps)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        self.mtp = nn.ModuleList([MTPModule(cfg) for _ in range(cfg.mtp_depth)])
         self.grad_ckpt = False
         self._init_weights()
         if cfg.tie_embeddings:
@@ -316,7 +331,29 @@ class HeimdallLM(nn.Module):
         logits = self._logits(x)
         if targets is None:
             return logits
-        return F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
+        if self.training and len(self.mtp):
+            loss = loss + self.cfg.mtp_weight * self._mtp_loss(x, targets)
+        return loss
+
+    def _mtp_loss(self, x, targets):
+        """targets[:, i] = x_{i+1}. Modül k (1'den): girdi h_i ve x_{i+k}, hedef x_{i+k+1}."""
+        h, t, losses = self.norm(x), targets.size(1), []
+        safe = targets.clamp(min=0)
+        for k, mod in enumerate(self.mtp, start=1):
+            n = t - k
+            if n <= 0:
+                break
+            h = mod(self.embed(safe[:, k - 1:k - 1 + n]), h[:, :n])
+            logits = self._logits_from(mod.norm(h))
+            losses.append(F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets[:, k:k + n].reshape(-1),
+                                          ignore_index=-100))
+        return sum(losses) / len(losses)
+
+    def _logits_from(self, hn):
+        logits = self.lm_head(hn).float()
+        cap = self.cfg.logit_softcap
+        return cap * torch.tanh(logits / cap) if cap else logits
 
     # ------------------------------------------------------------------ cache yönetimi
     def new_cache(self, batch: int = 1) -> dict:

@@ -88,7 +88,7 @@ Eğer Python yüklü olmayan bir bilgisayarda açacaksanız:
 
 ### Yönetim Paneli Özellikleri:
 * **Canlı Sunucu Bağlantısı:** Sunucu adresi varsayılan olarak `https://valerois.com` olarak gelir.
-* **Gizli Anahtar (Secret Key):** `valerois_titan_founder_2026` (Ayrıca `valerois2026` parolasını da kabul eder).
+* **Gizli Anahtar (Secret Key):** `<ADMIN_SECRET_KEY>` (Ayrıca `<ADMIN_PASSWORD>` parolasını da kabul eder).
 * **Uygulama Yönetimi (Apps Tab):** Yeni uygulama ekleme, silme, indirme bağlantısı ve durum (Canlı, Beta, Geliştirme) güncelleme.
 * **Model Yönetimi (Models Tab):** Parametre sayıları (M, B, T kısaltma butonlarıyla), mimari katmanları, durum ve indirme linkleri.
 * **Kıyaslama ve Matris Yönetimi (Benchmarks Tab):** Yeni benchmark kategorisi/testi oluşturma, herhangi bir modele ait skorları tablodan çift tıklayarak anında düzenleme. Boş modellerde otomatik `~` işareti gösterilir.
@@ -165,8 +165,8 @@ Sitede yeni bir sayfa veya kod değişikliği yapmak isterseniz:
 
 | Parametre | Değer |
 | :--- | :--- |
-| **Admin Secret Key (Header)** | `valerois_titan_founder_2026` |
-| **Yedek Admin Parolası** | `valerois2026` |
+| **Admin Secret Key (Header)** | `<ADMIN_SECRET_KEY>` |
+| **Yedek Admin Parolası** | `<ADMIN_PASSWORD>` |
 | **Canlı API Uç Noktası** | `https://valerois.com/api/data.php` |
 | **Canlı Admin Uç Noktası** | `https://valerois.com/api/admin.php` |
 | **Varsayılan MySQL DB Adı** | `valerois_db` *(Özelleştirilebilir: `api/config.php`)* |

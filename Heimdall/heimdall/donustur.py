@@ -69,15 +69,19 @@ class Q4Linear(nn.Module):
 
     CLIPS = (1.0, 0.95, 0.9, 0.85, 0.8, 0.7)
 
-    def __init__(self, weight: torch.Tensor, group: int = 32, rows: int = 2048, bits: int = 4) -> None:
+    def __init__(self, weight: torch.Tensor, group: int = 32, rows: int = 2048, bits: int = 4, device=None) -> None:
+        """weight CPU'da kalabilir: satır parçaları tek tek `device`'a taşınıp nicemlenir (tam bf16 kopya GPU'ya çıkmaz)."""
         super().__init__()
         out_f, in_f = weight.shape
         assert in_f % group == 0, (in_f, group)
-        packed, scales, zeros = [], [], []
+        device = torch.device(device) if device is not None else weight.device
         top = 2 ** bits - 1
         self.bits = bits
+        packed = torch.empty(out_f, in_f // 2 if bits == 4 else in_f, dtype=torch.uint8, device=device)
+        scale = torch.empty(out_f, in_f // group, dtype=torch.half, device=device)
+        zero = torch.empty(out_f, in_f // group, dtype=torch.half, device=device)
         for r in range(0, out_f, rows):  # satır parçaları: büyük matrislerde bellek tepe noktası küçük kalır
-            w = weight[r:r + rows].float().view(-1, in_f // group, group)
+            w = weight[r:r + rows].to(device).float().view(-1, in_f // group, group)
             wmax, wmin = w.amax(-1, keepdim=True), w.amin(-1, keepdim=True)
             best_err = best_s = best_z = None
             for c in self.CLIPS:
@@ -91,14 +95,33 @@ class Q4Linear(nn.Module):
                     best_err = torch.where(better, err, best_err)
                     best_s, best_z = torch.where(better, sc, best_s), torch.where(better, z, best_z)
             q = ((w - best_z) / best_s).round().clamp(0, top).to(torch.uint8).view(w.size(0), in_f)
-            packed.append(q[:, 0::2] | (q[:, 1::2] << 4) if bits == 4 else q)
-            scales.append(best_s.squeeze(-1).half())
-            zeros.append(best_z.squeeze(-1).half())
-        self.register_buffer("packed", torch.cat(packed))                           # [out, in/2]
-        self.register_buffer("scale", torch.cat(scales))                            # [out, in/group]
-        self.register_buffer("zero", torch.cat(zeros))
+            packed[r:r + rows] = q[:, 0::2] | (q[:, 1::2] << 4) if bits == 4 else q
+            scale[r:r + rows], zero[r:r + rows] = best_s.squeeze(-1).half(), best_z.squeeze(-1).half()
+            del w, wmax, wmin, best_err, best_s, best_z, sc, z, err, q
+        self.register_buffer("packed", packed)                                      # [out, in/2]
+        self.register_buffer("scale", scale)                                        # [out, in/group]
+        self.register_buffer("zero", zero)
         self.in_features, self.out_features, self.group = in_f, out_f, group
         self.bias = None
+
+    @classmethod
+    def empty(cls, out_f: int, in_f: int, group: int = 32, bits: int = 4, device=None) -> "Q4Linear":
+        """Boş iskelet (kayıtlı nicemlenmiş ağırlıklar load_state_dict ile doldurulur; yeniden nicemleme yok)."""
+        m = cls.__new__(cls)
+        nn.Module.__init__(m)
+        m.bits, m.in_features, m.out_features, m.group, m.bias = bits, in_f, out_f, group, None
+        m.register_buffer("packed", torch.empty(out_f, in_f // 2 if bits == 4 else in_f, dtype=torch.uint8, device=device))
+        m.register_buffer("scale", torch.empty(out_f, in_f // group, dtype=torch.half, device=device))
+        m.register_buffer("zero", torch.empty(out_f, in_f // group, dtype=torch.half, device=device))
+        return m
+
+    def dequant_rows(self, r0: int, r1: int, dtype) -> torch.Tensor:
+        """Yalnız [r0, r1) satırlarını aç (büyük sözlük başında tüm matrisi açmadan)."""
+        p = self.packed[r0:r1]
+        q = torch.stack((p & 15, p >> 4), -1) if self.bits == 4 else p
+        n = p.size(0)
+        q = q.reshape(n, -1, self.group).to(dtype)
+        return (q * self.scale[r0:r1].to(dtype)[..., None] + self.zero[r0:r1].to(dtype)[..., None]).view(n, self.in_features)
 
     def dequant(self, dtype) -> torch.Tensor:
         q = torch.stack((self.packed & 15, self.packed >> 4), -1) if self.bits == 4 else self.packed
@@ -107,7 +130,25 @@ class Q4Linear(nn.Module):
             self.out_features, self.in_features)
 
     def forward(self, x):
-        return F.linear(x, self.dequant(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
+        if torch.is_autocast_enabled(x.device.type):
+            x = x.to(torch.get_autocast_dtype(x.device.type))
+        with torch.autocast(x.device.type, enabled=False):
+            y = _DequantMM.apply(x, self)
+        return y if self.bias is None else y + self.bias.to(y.dtype)
+
+
+class _DequantMM(torch.autograd.Function):
+    """x · Wᵀ, W = Q4Linear. Açılmış ağırlık geri yayılım için SAKLANMAZ, gerektiğinde yeniden açılır
+    (27B öğretmende katman başına ~0.5 GB tasarruf). Ağırlığa gradyan yok (donuk öğretmen)."""
+
+    @staticmethod
+    def forward(ctx, x, mod):
+        ctx.mod = mod
+        return F.linear(x, mod.dequant(x.dtype))
+
+    @staticmethod
+    def backward(ctx, g):
+        return g @ ctx.mod.dequant(g.dtype), None
 
 
 class _TernaryMM(torch.autograd.Function):

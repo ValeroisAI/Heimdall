@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Valerois Runtime: starts the Bifrost-patched llama-server as a local OpenAI-compatible endpoint.
+#
+#   valerois-runtime model.gguf                 # http://127.0.0.1:1234/v1  (Nova: Settings → Models → Local)
+#   valerois-runtime model.gguf --port 8080 --ctx 65536
+#   valerois-runtime model.gguf -- --temp 0.6   # anything after -- goes to llama-server unchanged
+#
+# Options: --port N (1234), --host H (127.0.0.1), --ctx N (131072 for Bifrost GGUFs, else 32768),
+#          --checkpoints N (4), --api-key KEY (none), --bin DIR (next to this script).
+# Environment: VALEROIS_MODEL, VALEROIS_PORT, VALEROIS_CTX, GGML_VK_VISIBLE_DEVICES (pick a GPU).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+BIN="${VALEROIS_BIN:-}"
+MODEL="${VALEROIS_MODEL:-}"
+PORT="${VALEROIS_PORT:-1234}"
+HOST="127.0.0.1"
+CTX="${VALEROIS_CTX:-}"
+CKPT=4
+KEY=""
+EXTRA=()
+
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)     usage ;;
+    --port)        PORT="$2"; shift 2 ;;
+    --host)        HOST="$2"; shift 2 ;;
+    --ctx)         CTX="$2"; shift 2 ;;
+    --checkpoints) CKPT="$2"; shift 2 ;;
+    --api-key)     KEY="$2"; shift 2 ;;
+    --bin)         BIN="$2"; shift 2 ;;
+    --)            shift; EXTRA=("$@"); break ;;
+    -*)            echo "unknown option: $1" >&2; usage 1 ;;
+    *)             MODEL="$1"; shift ;;
+  esac
+done
+
+[ -n "$MODEL" ] || { echo "error: give a .gguf model (valerois-runtime model.gguf)" >&2; usage 1; }
+[ -f "$MODEL" ] || { echo "error: model not found: $MODEL" >&2; exit 1; }
+
+if [ -z "$BIN" ]; then
+  for d in "$HERE" "$HERE/bin" "$HOME/llama.cpp-bifrost/build/bin"; do
+    [ -x "$d/llama-server" ] && BIN="$d" && break
+  done
+fi
+[ -n "$BIN" ] && [ -x "$BIN/llama-server" ] || { echo "error: llama-server not found (use --bin DIR)" >&2; exit 1; }
+
+# Bifrost layers keep a constant state, so a long context costs no extra memory. Other GGUFs grow a KV cache.
+name="$(basename "$MODEL")"
+if [ -z "$CTX" ]; then
+  case "${name,,}" in *bifrost*) CTX=131072 ;; *) CTX=32768 ;; esac
+fi
+
+if command -v ss >/dev/null && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$PORT\$"; then
+  echo "error: port $PORT is in use (LM Studio?). Pick another one: --port 1235" >&2
+  exit 1
+fi
+
+ARGS=(-m "$MODEL" -ngl 99 -c "$CTX" -np 1 --jinja --host "$HOST" --port "$PORT"
+      --alias "${name%.gguf}" --ctx-checkpoints "$CKPT")
+[ -n "$KEY" ] && ARGS+=(--api-key "$KEY")
+
+echo "Valerois Runtime: $name | context $CTX | http://$HOST:$PORT/v1"
+echo "  Nova: Settings → Models → Local (port 1234), or 'Your own server' with the URL above."
+exec "$BIN/llama-server" "${ARGS[@]}" "${EXTRA[@]}"

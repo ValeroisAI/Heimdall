@@ -1,0 +1,1320 @@
+diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_delta_net.cu
+index ae2374c..53a7d21 100644
+--- a/ggml/src/ggml-cuda/gated_delta_net.cu
++++ b/ggml/src/ggml-cuda/gated_delta_net.cu
+@@ -234,6 +234,13 @@ static void launch_gated_delta_net(
+                 sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
+             break;
+         }
++        case 256: {   // Bifrost memory heads (window + delayed-write delta memory)
++            ggml_cuda_kernel_launch(gated_delta_net_cuda<256, KDA, keep_rs_t>, launch_params,
++                q_d, k_d, v_d, g_d, b_d, s_d, dst_d, state_d, H,
++                n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
++                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_slot_stride, K);
++            break;
++        }
+         default:
+             GGML_ABORT("fatal error");
+     }
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 06956ce..fc70393 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -6185,7 +6185,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+         case GGML_OP_RWKV_WKV7:
+             return true;
+         case GGML_OP_GATED_DELTA_NET:
+-            return true;
++            {
++                const int64_t S_v = op->src[2]->ne[0];
++                return S_v == 16 || S_v == 32 || S_v == 64 || S_v == 128 || S_v == 256;
++            }
+         case GGML_OP_DSV4_HC_COMB:
+             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                 op->src[2]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan-types.h b/ggml/src/ggml-vulkan/ggml-vulkan-types.h
+index a150555..7bf5897 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/ggml/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -966,7 +966,7 @@ struct vk_device_struct {
+     vk_pipeline pipeline_gated_linear_attn_f32;
+     vk_pipeline pipeline_lightning_indexer_f32[GGML_TYPE_COUNT];
+     // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
+-    vk_pipeline pipeline_gated_delta_net[4][2];
++    vk_pipeline pipeline_gated_delta_net[5][2];   // S_v 16..256 (256: Bifrost memory heads)
+     vk_pipeline pipeline_ssm_scan_f32_d128;
+     vk_pipeline pipeline_ssm_scan_f32_d256;
+     vk_pipeline pipeline_ssm_conv_f32;
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index c094368..1b9b81b 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3673,14 +3673,15 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     }
+ 
+     {
+-        const uint32_t gdn_sizes[] = {16, 32, 64, 128};
++        const uint32_t gdn_sizes[] = {16, 32, 64, 128, 256};
+         const char * gdn_names[][2] = {
+             {"gated_delta_net_f32_d16",     "gated_delta_net_f32_d16_kda"},
+             {"gated_delta_net_f32_d32",     "gated_delta_net_f32_d32_kda"},
+             {"gated_delta_net_f32_d64",     "gated_delta_net_f32_d64_kda"},
+             {"gated_delta_net_f32_d128",    "gated_delta_net_f32_d128_kda"},
++            {"gated_delta_net_f32_d256",    "gated_delta_net_f32_d256_kda"},
+         };
+-        for (uint32_t si = 0; si < 4; si++) {
++        for (uint32_t si = 0; si < 5; si++) {
+             const uint32_t S_V = gdn_sizes[si];
+             GGML_ASSERT(is_pow2(S_V));
+ 
+@@ -9311,6 +9312,7 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+                 case 32:  si = 1; break;
+                 case 64:  si = 2; break;
+                 case 128: si = 3; break;
++                case 256: si = 4; break;
+                 default: return nullptr;
+             }
+             return ctx->device->pipeline_gated_delta_net[si][kda];
+@@ -16073,7 +16075,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+         case GGML_OP_GATED_DELTA_NET:
+             {
+                 const uint32_t S_v = op->src[2]->ne[0];
+-                if (S_v != 16 && S_v != 32 && S_v != 64 && S_v != 128) {
++                if (S_v != 16 && S_v != 32 && S_v != 64 && S_v != 128 && S_v != 256) {
+                     return false;
+                 }
+                 for (int i = 0; i < 6; i++) {
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 8a0d6b1..c5e5c41 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -265,6 +265,9 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_TOKEN_SHIFT_COUNT,                 "%s.token_shift_count"                 },
+     { LLM_KV_INTERLEAVE_MOE_LAYER_STEP,         "%s.interleave_moe_layer_step"         },
+     { LLM_KV_FULL_ATTENTION_INTERVAL,           "%s.full_attention_interval"           },
++    { LLM_KV_BIFROST_WINDOW,                    "%s.bifrost.window"                    },
++    { LLM_KV_BIFROST_SINKS,                     "%s.bifrost.sinks"                     },
++    { LLM_KV_BIFROST_LAYERS,                    "%s.bifrost.layers"                    },
+     { LLM_KV_NUM_LOOPS,                         "%s.num_loops"                         },
+     { LLM_KV_SKIP_LOOP_FINAL_NORM,              "%s.skip_loop_final_norm"              },
+     { LLM_KV_HRM_LAYERS_PER_STACK,              "%s.hrm.layers_per_stack"              },
+@@ -584,6 +587,16 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+     { LLM_TENSOR_ENC_OUTPUT_NORM,                        "enc.output_norm" },
+     { LLM_TENSOR_FFN_GATE_INP_SHEXP,                     "blk.%d.ffn_gate_inp_shexp" },
+     { LLM_TENSOR_SSM_A_NOSCAN,                           "blk.%d.ssm_a" },
++    { LLM_TENSOR_BIFROST_FQ,                             "blk.%d.bifrost_fq" },
++    { LLM_TENSOR_BIFROST_FK,                             "blk.%d.bifrost_fk" },
++    { LLM_TENSOR_BIFROST_AB,                             "blk.%d.bifrost_ab" },
++    { LLM_TENSOR_BIFROST_AB_B,                           "blk.%d.bifrost_ab_b" },
++    { LLM_TENSOR_BIFROST_MIX,                            "blk.%d.bifrost_mix" },
++    { LLM_TENSOR_BIFROST_MIX_B,                          "blk.%d.bifrost_mix_b" },
++    { LLM_TENSOR_BIFROST_MIX_LSE,                        "blk.%d.bifrost_mix_lse" },
++    { LLM_TENSOR_BIFROST_MEM_SCALE,                      "blk.%d.bifrost_mem_scale" },
++    { LLM_TENSOR_BIFROST_A,                              "blk.%d.bifrost_a" },
++    { LLM_TENSOR_BIFROST_DT,                             "blk.%d.bifrost_dt" },
+     { LLM_TENSOR_SSM_CONV1D,                             "blk.%d.ssm_conv1d" },
+     { LLM_TENSOR_SSM_DT,                                 "blk.%d.ssm_dt" },
+     { LLM_TENSOR_SSM_BETA_ALPHA,                         "blk.%d.ssm_ba" },
+@@ -998,6 +1011,16 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     {LLM_TENSOR_SSM_CONV1D,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+     {LLM_TENSOR_SSM_A,                      {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_SCAN}},
+     {LLM_TENSOR_SSM_A_NOSCAN,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}}, // a version of SSM_A used for MUL instead of SSM_SCAN
++    {LLM_TENSOR_BIFROST_FQ,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_BIFROST_FK,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_BIFROST_AB,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_BIFROST_AB_B,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
++    {LLM_TENSOR_BIFROST_MIX,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_BIFROST_MIX_B,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
++    {LLM_TENSOR_BIFROST_MIX_LSE,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_BIFROST_MEM_SCALE,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_BIFROST_A,                  {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_BIFROST_DT,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
+     {LLM_TENSOR_SSM_DT_NORM,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_SSM_B_NORM,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_SSM_C_NORM,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 072d3bc..157324c 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -269,6 +269,9 @@ enum llm_kv {
+     LLM_KV_TOKEN_SHIFT_COUNT,
+     LLM_KV_INTERLEAVE_MOE_LAYER_STEP,
+     LLM_KV_FULL_ATTENTION_INTERVAL,
++    LLM_KV_BIFROST_WINDOW,
++    LLM_KV_BIFROST_SINKS,
++    LLM_KV_BIFROST_LAYERS,
+     LLM_KV_NUM_LOOPS,
+     LLM_KV_SKIP_LOOP_FINAL_NORM,
+     LLM_KV_HRM_LAYERS_PER_STACK,
+@@ -602,6 +605,16 @@ enum llm_tensor {
+     LLM_TENSOR_SSM_C_NORM,
+     LLM_TENSOR_SSM_D,
+     LLM_TENSOR_SSM_NORM,
++    LLM_TENSOR_BIFROST_FQ,          // bifrost: memory query transform  [D, D, n_head]
++    LLM_TENSOR_BIFROST_FK,          // bifrost: memory key transform    [D, D, n_head_kv]
++    LLM_TENSOR_BIFROST_AB,          // bifrost: decay/write-gate proj   [n_embd, 2*n_head_kv]
++    LLM_TENSOR_BIFROST_AB_B,
++    LLM_TENSOR_BIFROST_MIX,         // bifrost: window/memory mix proj  [n_embd, n_head]
++    LLM_TENSOR_BIFROST_MIX_B,
++    LLM_TENSOR_BIFROST_MIX_LSE,
++    LLM_TENSOR_BIFROST_MEM_SCALE,
++    LLM_TENSOR_BIFROST_A,           // -exp(A_log) * decay_mask        [n_head_kv]
++    LLM_TENSOR_BIFROST_DT,
+     LLM_TENSOR_SSM_OUT,
+     LLM_TENSOR_SSM_BETA_ALPHA,      // qwen3next
+     LLM_TENSOR_SSM_ALPHA,           // qwen3.5
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 43eb46e..b851f53 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1115,8 +1115,13 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
+ }
+ 
+ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
+-    mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
+-    mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
++    // no attention layer in this graph (e.g. all converted to bifrost recurrent layers): idxs stay unallocated
++    if (inp_attn->self_k_idxs && inp_attn->self_k_idxs->buffer) {
++        mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
++    }
++    if (inp_attn->self_v_idxs && inp_attn->self_v_idxs->buffer) {
++        mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
++    }
+ 
+     // leave the mask unallocated if all attention layers have their own (e.g. qwen4exp QSA)
+     if (inp_attn->self_kq_mask->buffer) {
+diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
+index 9b42445..311b5dd 100644
+--- a/src/llama-hparams.cpp
++++ b/src/llama-hparams.cpp
+@@ -1,5 +1,8 @@
+ #include "llama-hparams.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++
+ #include "ggml.h"
+ 
+ #include <algorithm>
+@@ -274,6 +277,44 @@ uint32_t llama_hparams::ple_conv_state() const {
+     return (ple_conv_kernel - 1) * ple_ngram_size * dsv4_hc_mult * n_embd;
+ }
+ 
++const llama_bifrost_ret & llama_bifrost_ret_cfg() {
++    static const llama_bifrost_ret cfg = [] {
++        llama_bifrost_ret c;
++        if (const char * e = getenv("BIFROST_RET")) {
++            int v[4] = { 0, c.window, c.block, c.sinks };
++            sscanf(e, "%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3]);
++            c.k = v[0], c.window = v[1], c.block = v[2], c.sinks = v[3];
++            GGML_ASSERT(c.block > 0 && c.window >= c.block && c.sinks >= 0 && "BIFROST_RET: bad window/block/sinks");
++        }
++        return c;
++    }();
++    return cfg;
++}
++
++bool llama_hparams::is_bifrost(uint32_t il) const {
++    return bifrost_window > 0 && il < n_layer_all && is_bifrost_impl[il];
++}
++
++uint32_t llama_hparams::bifrost_ring_ch() const {
++    const uint32_t d = n_embd_head_k(), hkv = n_head_kv(0);
++    return 3 * hkv * d + 2 * hkv;
++}
++
++uint32_t llama_hparams::bifrost_region() const {
++    return (bifrost_sinks + bifrost_window + 2 + 31) / 32 * 32;   // aligned length: faster GPU kernels over the keys
++}
++
++uint32_t llama_hparams::bifrost_state() const {
++    if (bifrost_window == 0) {
++        return 0;
++    }
++    const uint32_t d = n_embd_head_k(), hkv = n_head_kv(0);
++    // region: sinks | ring of W+1 slots (slot = pos mod (W+1)) | scratch + padding, all rows [k_rope | v | k_mem | g | beta];
++    // then the delta state, one per KV head (the query heads of a group read the same state)
++    // between them: K plane [D, L, G] and transposed V plane [L, D, G] for the decode attention (contiguous reads)
++    return bifrost_region() * (bifrost_ring_ch() + 2 * hkv * d) + d * d * hkv;
++}
++
+ bool llama_hparams::is_ple(uint32_t il) const {
+     if (il < n_layer_all) {
+         return is_ple_impl[il];
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index 4d2cb89..746e0cf 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -57,6 +57,19 @@ struct llama_hparams_convnext {
+     uint32_t n_layer;
+ };
+ 
++// Bifrost (Valerois) retrieval attention for the full-attention layers left unconverted (env, read once):
++//   BIFROST_RET="k[,window[,block[,sinks]]]", e.g. "16,2048,64,4". At single-token decode each such layer attends
++//   exactly to the sinks, the window and the k key blocks with the highest upper bound on q.k per KV head
++//   (per-block key min/max kept next to the KV cache). Prefill uses full attention. One sequence only.
++struct llama_bifrost_ret {
++    int32_t k      = 0;
++    int32_t window = 2048;
++    int32_t block  = 64;
++    int32_t sinks  = 4;
++    bool on() const { return k > 0; }
++};
++const llama_bifrost_ret & llama_bifrost_ret_cfg();
++
+ struct llama_hparams {
+     // note: use the `_impl` suffix to avoid name conflict between members and getters
+     //       for example: n_embd_out() vs n_embd_out_impl
+@@ -380,6 +393,17 @@ struct llama_hparams {
+ 
+     bool is_ple(uint32_t il) const;
+ 
++    // Bifrost (Valerois): full-attention layers converted to window + sinks + delayed-write delta memory.
++    // Such a layer is recurrent (constant state): ring of the last W tokens' [k_rope | v | k_mem | g | beta],
++    // S sink tokens' [k_rope | v], and one delta-rule state per query head.
++    uint32_t bifrost_window = 0;
++    uint32_t bifrost_sinks  = 0;
++    std::bitset<LLAMA_MAX_LAYERS> is_bifrost_impl;
++    bool     is_bifrost(uint32_t il) const;
++    uint32_t bifrost_ring_ch() const;   // channels of one ring row
++    uint32_t bifrost_region() const;    // region slots: sinks | ring (W+1) | scratch, padded to a multiple of 32
++    uint32_t bifrost_state() const;     // floats per sequence: ring + sinks + delta state (0 if unused)
++
+     // PLE conv history rows: (kernel - 1) * ngram_size; 0 without a PLE module
+     uint32_t ple_conv_state() const;
+ 
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 6d5a576..167bd39 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -246,6 +246,14 @@ llama_kv_cache::llama_kv_cache(
+         map_layer_ids[il] = layers.size();
+ 
+         layers.push_back({ il, k, v, k_stream, v_stream, });
++
++        const auto & ret = llama_bifrost_ret_cfg();
++        if (ret.on() && n_stream == 1 && !is_mla && kv_size > (uint32_t) (ret.sinks + ret.block)) {
++            const int64_t n_blk = (kv_size - ret.sinks) / ret.block;
++            ggml_tensor * ks = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hparams.n_embd_head_k(il), n_blk + 1, 2 * hparams.n_head_kv(il));
++            ggml_format_name(ks, "cache_%sksum_l%d", name_tag, il);
++            layers.back().ksum = ks;
++        }
+     }
+ 
+     if (reuse) {
+@@ -1344,6 +1352,10 @@ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_k
+             ggml_row_size(k->type, n_embd_k_gqa*kv_size)*sinfo.s0);
+ }
+ 
++ggml_tensor * llama_kv_cache::get_k_raw(int32_t il) const { return layers[map_layer_ids.at(il)].k; }
++ggml_tensor * llama_kv_cache::get_v_raw(int32_t il) const { return layers[map_layer_ids.at(il)].v; }
++ggml_tensor * llama_kv_cache::get_ksum (int32_t il) const { return layers[map_layer_ids.at(il)].ksum; }
++
+ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+     const int32_t ikv = map_layer_ids.at(il);
+ 
+@@ -2894,6 +2906,11 @@ ggml_type llama_kv_cache_context::type_v() const {
+     return kv->type_v();
+ }
+ 
++ggml_tensor * llama_kv_cache_context::get_k_raw(int32_t il) const { return kv->get_k_raw(il); }
++ggml_tensor * llama_kv_cache_context::get_v_raw(int32_t il) const { return kv->get_v_raw(il); }
++ggml_tensor * llama_kv_cache_context::get_ksum (int32_t il) const { return kv->get_ksum(il); }
++bool          llama_kv_cache_context::get_v_trans() const { return kv->get_v_trans(); }
++
+ ggml_tensor * llama_kv_cache_context::get_k(ggml_context * ctx, int32_t il) const {
+     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
+ }
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 6dfd0c5..6f49b4b 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -158,6 +158,7 @@ public:
+     uint32_t get_size()     const;
+     uint32_t get_n_seq_max() const;
+     uint32_t get_n_stream() const;
++    bool     get_v_trans()  const { return v_trans; }
+ 
+     bool get_has_shift() const;
+ 
+@@ -194,6 +195,11 @@ public:
+ 
+     // get views of the current state of the cache
+     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
++
++    // Bifrost retrieval: the whole K/V tensors of a layer and its block summary (nullptr when off)
++    ggml_tensor * get_k_raw(int32_t il) const;
++    ggml_tensor * get_v_raw(int32_t il) const;
++    ggml_tensor * get_ksum (int32_t il) const;
+     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+ 
+     // store k_cur and v_cur in the cache based on the provided head location
+@@ -264,6 +270,10 @@ private:
+ 
+         ggml_tensor * k_rot = nullptr;
+         ggml_tensor * v_rot = nullptr;
++
++        // Bifrost retrieval: per-block key max (heads 0..G-1) and min (G..2G-1), F32 [D, n_blocks + 1, 2G];
++        // block b holds cells [S + b*L, S + (b+1)*L); the last row is a spare write target
++        ggml_tensor * ksum = nullptr;
+     };
+ 
+     bool v_trans = true;  // the value tensor is transposed
+@@ -409,6 +419,11 @@ public:
+     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
+     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+ 
++    ggml_tensor * get_k_raw(int32_t il) const;
++    ggml_tensor * get_v_raw(int32_t il) const;
++    ggml_tensor * get_ksum (int32_t il) const;
++    bool          get_v_trans() const;
++
+     // store k_cur and v_cur in the cache based on the provided head location
+     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
+     //   - k_cur  [n_embd_head_k, n_head_k, n_tokens]
+diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
+index 9213ac1..603bebd 100644
+--- a/src/llama-memory-recurrent.cpp
++++ b/src/llama-memory-recurrent.cpp
+@@ -53,7 +53,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+         if (it == ctx_map.end()) {
+             ggml_init_params params = {
+                 // r and s per layer, plus the separate PLE conv row where the model has one
+-                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
++                /*.mem_size   =*/ size_t((2u + (hparams.ple_conv_state() > 0) + (hparams.bifrost_state() > 0))*n_layer*ggml_tensor_overhead()),
+                 /*.mem_buffer =*/ NULL,
+                 /*.no_alloc   =*/ true,
+             };
+@@ -74,6 +74,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+     r_l.resize(n_layer);
+     s_l.resize(n_layer);
+     p_l.resize(n_layer);
++    b_l.resize(n_layer);
+ 
+     for (int i = 0; i < n_layer; i++) {
+         if (filter && !filter(i)) {
+@@ -113,6 +114,12 @@ llama_memory_recurrent::llama_memory_recurrent(
+             ggml_format_name(p, "cache_ple_r_l%d", i);
+             p_l[i] = p;
+         }
++
++        if (hparams.is_bifrost(i)) {
++            ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hparams.bifrost_state(), n_rows);
++            ggml_format_name(b, "cache_bifrost_l%d", i);
++            b_l[i] = b;
++        }
+     }
+ 
+     // allocate the tensors and initialize the buffers to avoid NaNs in the padding
+@@ -139,6 +146,14 @@ llama_memory_recurrent::llama_memory_recurrent(
+                 ggml_type_name(type_r), (float)memory_size_r / (1024.0f * 1024.0f),
+                 ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f),
+                 ggml_type_name(type_r), (float)memory_size_p / (1024.0f * 1024.0f));
++        size_t memory_size_b = 0;
++        for (const auto & b : b_l) {
++            memory_size_b += b ? ggml_nbytes(b) : 0;
++        }
++        if (memory_size_b > 0) {
++            LLAMA_LOG_INFO("%s: bifrost state (window %u + %u sinks + delta) = %7.2f MiB\n", __func__,
++                    hparams.bifrost_window, hparams.bifrost_sinks, (float)memory_size_b / (1024.0f * 1024.0f));
++        }
+     }
+ }
+ 
+@@ -950,6 +965,16 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
+                 io.write_tensor(p_l[il], range.first * p_size_row, range_size * p_size_row);
+             }
+         }
++
++        if (b_l[il] != nullptr) {
++            const uint64_t b_size_row = ggml_row_size(b_l[il]->type, hparams.bifrost_state());
++            io.write(&b_size_row, sizeof(b_size_row));
++
++            for (const auto & range : cell_ranges) {
++                const size_t range_size = range.second - range.first;
++                io.write_tensor(b_l[il], range.first * b_size_row, range_size * b_size_row);
++            }
++        }
+     }
+ 
+     if (!s_trans) {
+@@ -1167,6 +1192,20 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
+                 io.read_tensor(p_l[il], head * p_size_row, cell_count * p_size_row);
+             }
+         }
++
++        if (b_l[il] != nullptr) {
++            uint64_t b_size_row_ref;
++            io.read(&b_size_row_ref, sizeof(b_size_row_ref));
++            const size_t b_size_row = ggml_row_size(b_l[il]->type, hparams.bifrost_state());
++            if (b_size_row != b_size_row_ref) {
++                LLAMA_LOG_ERROR("%s: mismatched bifrost row size (%zu != %zu, layer %d)\n", __func__, b_size_row, (size_t) b_size_row_ref, il);
++                return false;
++            }
++
++            if (cell_count) {
++                io.read_tensor(b_l[il], head * b_size_row, cell_count * b_size_row);
++            }
++        }
+     }
+ 
+     if (!s_trans) {
+@@ -1277,6 +1316,11 @@ void llama_memory_recurrent::state_clear(llama_seq_id seq_id, uint32_t cell_head
+             const size_t p_size_row = ggml_row_size(p_l[il]->type, hparams.ple_conv_state());
+             llama_clear_tensor_data(p_l[il], cell_head * p_size_row, cell_count * p_size_row);
+         }
++
++        if (b_l[il] != nullptr) {
++            const size_t b_size_row = ggml_row_size(b_l[il]->type, hparams.bifrost_state());
++            llama_clear_tensor_data(b_l[il], cell_head * b_size_row, cell_count * b_size_row);
++        }
+     }
+ }
+ 
+@@ -1360,6 +1404,10 @@ ggml_tensor * llama_memory_recurrent_context::get_p_l(int32_t il) const {
+     return mem->p_l[il];
+ }
+ 
++ggml_tensor * llama_memory_recurrent_context::get_b_l(int32_t il) const {
++    return mem->b_l[il];
++}
++
+ int32_t llama_memory_recurrent_context::s_copy(int i) const {
+     const uint32_t cell_idx = i + mem->head;
+     const int32_t  src0     = mem->cells[cell_idx].src0;
+diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
+index 6442fc1..8feffdd 100644
+--- a/src/llama-memory-recurrent.h
++++ b/src/llama-memory-recurrent.h
+@@ -118,6 +118,8 @@ public:
+     std::vector<ggml_tensor *> s_l;
+     // a second conv history that must stay replicated across devices, so it cannot share the r row
+     std::vector<ggml_tensor *> p_l;
++    // Bifrost layer state (ring + sinks + delta), one row per cell
++    std::vector<ggml_tensor *> b_l;
+ 
+ private:
+     //const llama_model & model;
+@@ -184,6 +186,7 @@ public:
+     ggml_tensor * get_r_l(int32_t il) const;
+     ggml_tensor * get_s_l(int32_t il) const;
+     ggml_tensor * get_p_l(int32_t il) const;
++    ggml_tensor * get_b_l(int32_t il) const;
+ 
+     int32_t s_copy(int i) const;
+ 
+diff --git a/src/llama-model.h b/src/llama-model.h
+index da4964c..629219c 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -664,6 +664,11 @@ struct llama_layer {
+     struct llama_layer_nextn nextn;
+ 
+     struct llama_layer_switch_lora switch_lora;
++
++    struct {
++        struct ggml_tensor * fq = nullptr, * fk = nullptr, * ab = nullptr, * ab_b = nullptr, * mix = nullptr,
++                           * mix_b = nullptr, * mix_lse = nullptr, * mem_scale = nullptr, * a = nullptr, * dt = nullptr;
++    } bifrost;
+ };
+ 
+ struct llama_device {
+diff --git a/src/models/models.h b/src/models/models.h
+index 9a8602b..9f5ebee 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -2644,6 +2644,69 @@ struct llama_model_qwen3next : public llama_model_base {
+ };
+ 
+ 
++// Bifrost (Valerois) inputs shared by all converted layers of one graph: window/sink mask and position masks
++struct llm_graph_input_bifrost : public llm_graph_input_i {
++    llm_graph_input_bifrost(uint32_t window, uint32_t sinks, int64_t n_rep, int64_t n_kv_ch, int64_t n_slots,
++                            int64_t n_seq_tokens, int64_t n_seqs, bool inplace)
++        : window(window), sinks(sinks), n_rep(n_rep), n_kv_ch(n_kv_ch), n_slots(n_slots), n_seq_tokens(n_seq_tokens),
++          n_seqs(n_seqs), inplace(inplace) {}
++    // the states of the ubatch can be read straight from the cache (no seq copy, no cleared state in this ubatch)
++    static bool can_inplace(const llama_memory_recurrent_context * mctx, int64_t n_seqs);
++    void set_input(const llama_ubatch * ubatch) override;
++    bool can_reuse(const llm_graph_params & params) override;
++
++    // decode (1 token/seq): mask over the region slots (bifrost_region());
++    // prefill: [S + W + T] (sinks, time-ordered ring, new tokens)
++    ggml_tensor * kq_mask   = nullptr; // F32 decode [L, 1, 1, n_seqs] | prefill [L, T, 1, n_seqs]
++    ggml_tensor * m_sink    = nullptr; // F32 [1, n_tokens]: pos >= sinks (sink tokens are never written to memory)
++    ggml_tensor * m_win     = nullptr; // F32 [1, n_tokens]: pos >= window (memory branch active)
++    ggml_tensor * idx_ring  = nullptr; // I32 decode [1, B]: slot of pos - W (read) | prefill [W, B]: slots in time order
++    ggml_tensor * idx_sink1 = nullptr; // I32 decode [1, B]: sink slot of this token or the scratch slot
++    ggml_tensor * idx_wb    = nullptr; // I32 [min(T,W), B]: ring slots of the last tokens of the ubatch (write)
++    ggml_tensor * sink_idx  = nullptr; // I32 prefill [S * B]: token of this ubatch that fills sink slot j
++    ggml_tensor * sink_sel  = nullptr; // F32 prefill [1, S, B]: 1 if slot j is filled by this ubatch
++    // element indices into the transposed V plane [L, D, G] (index = slot + L * (d + D * g))
++    ggml_tensor * idx_v_wb  = nullptr; // I32 [G*D * min(T,W), B]: rows written by this ubatch (decode: its ring slot)
++    ggml_tensor * idx_v_s1  = nullptr; // I32 decode [G*D, B]: this token's sink slot or the scratch slot
++
++    const uint32_t window;
++    const uint32_t sinks;
++    const int64_t  n_rep;        // query heads per KV head
++    const int64_t  n_kv_ch;      // G * D
++    const int64_t  n_slots;      // region slots L
++    const int64_t  n_seq_tokens;
++    const int64_t  n_seqs;
++    const bool     inplace;
++};
++
++// Bifrost retrieval attention inputs for the unconverted full-attention layers (llama_bifrost_ret, llama-hparams.h).
++// Every graph re-pools the key blocks its ubatch touched into the per-block max/min summary next to the KV cache;
++// a single-token decode graph whose position has at least k candidate blocks then attends to the sinks, the window
++// (from the block boundary at or before pos - W + 1) and the k blocks with the highest q.k upper bound per KV head.
++// Assumes one sequence whose cells are its positions (fresh cache, no shifting). Reference: hibrit.py (_retrieval_mask).
++struct llm_graph_input_bifrost_ret : public llm_graph_input_i {
++    llm_graph_input_bifrost_ret(const llama_bifrost_ret & cfg, int64_t n_rep, int64_t n_upd, int64_t n_blk_k,
++                                int64_t n_blk_u, bool dec)
++        : cfg(cfg), n_rep(n_rep), n_upd(n_upd), n_blk_k(n_blk_k), n_blk_u(n_blk_u), dec(dec) {}
++    static bool decode_active(const llama_bifrost_ret & cfg, const llama_ubatch & ub, int64_t n_blk_u);
++    void set_input(const llama_ubatch * ubatch) override;
++    bool can_reuse(const llm_graph_params & params) override;
++
++    ggml_tensor * upd_dst  = nullptr; // I32 [n_upd]: summary rows to rewrite (the blocks of this ubatch, else the spare row)
++    ggml_tensor * upd_src  = nullptr; // I32 [n_upd]: the K blocks pooled into them
++    ggml_tensor * upd_mask = nullptr; // F32 [L, 1, n_upd]: 0 for cells written so far, -inf after the last token
++    ggml_tensor * cand     = nullptr; // F32 [n_blk_u]: 0 for candidate blocks (they end before the window), else -inf
++    ggml_tensor * idx_sw   = nullptr; // I32 [S + W + L]: sink and window cells (unused slots: cell 0, masked)
++    ggml_tensor * kq_mask  = nullptr; // F32 [S + W + L + k*L, n_rep]
++
++    const llama_bifrost_ret cfg;
++    const int64_t n_rep;    // query heads per KV head
++    const int64_t n_upd;    // summary rows rewritten by this graph
++    const int64_t n_blk_k;  // blocks that fit in the KV cache (summary rows; one more is the spare)
++    const int64_t n_blk_u;  // blocks scored by this graph (within n_kv)
++    const bool    dec;      // retrieval decode graph (else: full attention + summary update)
++};
++
+ struct llama_model_qwen35 : public llama_model_base {
+     llama_model_qwen35(const struct llama_model_params & params) : llama_model_base(params) {}
+     void load_arch_hparams(llama_model_loader & ml) override;
+@@ -2652,8 +2715,26 @@ struct llama_model_qwen35 : public llama_model_base {
+     struct graph : public llm_build_delta_net_base {
+         graph(const llama_model & model, const llm_graph_params & params);
+     private:
++        ggml_tensor * build_attn_ret(
++        llm_graph_input_attn_kv * inp,
++    llm_graph_input_bifrost_ret * ri,
++                    ggml_tensor * q_cur,
++                    ggml_tensor * k_cur,
++                    ggml_tensor * v_cur,
++                          float   kq_scale,
++                            int   il);
++
++        ggml_tensor * build_layer_bifrost(
++             llm_graph_input_rs * inp,
++        llm_graph_input_bifrost * bi,
++                    ggml_tensor * cur,
++                    ggml_tensor * inp_pos,
++                            int * sections,
++                            int   il);
++
+         ggml_tensor * build_layer_attn(
+         llm_graph_input_attn_kv * inp_attn,
++    llm_graph_input_bifrost_ret * ri,
+                     ggml_tensor * cur,
+                     ggml_tensor * inp_pos,
+                             int * sections,
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 8a4e434..4f8d8d4 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -1,5 +1,14 @@
+ #include "models.h"
+ #include "llama-memory-recurrent.h"
++#include "llama-memory-hybrid.h"
++#include "llama-impl.h"
++#include "llama-kv-cache.h"
++
++#include <algorithm>
++#include <cstdlib>
++#include <array>
++#include <cmath>
++#include <vector>
+ 
+ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
+@@ -22,6 +31,22 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
+         }
+     }
+ 
++    // Bifrost: full-attention layers converted to window + sinks + delayed-write delta memory (recurrent, constant state)
++    ml.get_key(LLM_KV_BIFROST_WINDOW, hparams.bifrost_window, false);
++    if (hparams.bifrost_window > 0) {
++        ml.get_key(LLM_KV_BIFROST_SINKS, hparams.bifrost_sinks, false);
++        std::array<uint32_t, LLAMA_MAX_LAYERS> conv_layers{};
++        ml.get_key_or_arr(LLM_KV_BIFROST_LAYERS, conv_layers, hparams.n_layer_all, true);
++        hparams.is_bifrost_impl.reset();
++        for (uint32_t i = 0; i < hparams.n_layer(); ++i) {
++            if (conv_layers[i]) {
++                GGML_ASSERT(!hparams.is_recr_impl[i] && "bifrost layer must be a full-attention layer");
++                hparams.is_bifrost_impl.set(i);
++                hparams.is_recr_impl[i] = true;   // constant state lives in the recurrent memory
++            }
++        }
++    }
++
+     switch (hparams.n_layer()) {
+         case 24: type = hparams.n_embd == 1024 ? LLM_TYPE_0_8B : LLM_TYPE_2B; break;
+         case 32: type = hparams.n_embd == 2560 ? LLM_TYPE_4B : LLM_TYPE_9B; break;
+@@ -67,7 +92,7 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+         layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", il), { n_embd }, flags);
+         layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", il), { n_embd }, flags);
+ 
+-        if (!hparams.is_recr(il)) {
++        if (!hparams.is_recr(il) || hparams.is_bifrost(il)) {
+             // Attention layers
+             create_tensor_qkv(layer, il, n_embd, n_embd_head_k * n_head * 2, n_embd_k_gqa, n_embd_v_gqa, flags);
+             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_embd_head_k * n_head, n_embd }, flags);
+@@ -75,6 +100,21 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+             // Q/K normalization for attention layers
+             layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { n_embd_head_k }, flags);
+             layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", il), { n_embd_head_k }, flags);
++
++            if (hparams.is_bifrost(il)) {
++                const int64_t d = n_embd_head_k;
++                auto & bf = layer.bifrost;
++                bf.fq        = create_tensor(tn(LLM_TENSOR_BIFROST_FQ,        il), { d, d, n_head },          flags);
++                bf.fk        = create_tensor(tn(LLM_TENSOR_BIFROST_FK,        il), { d, d, n_head_kv },       flags);
++                bf.ab        = create_tensor(tn(LLM_TENSOR_BIFROST_AB,        il), { n_embd, 2 * n_head_kv }, flags);
++                bf.ab_b      = create_tensor(tn(LLM_TENSOR_BIFROST_AB_B,      il), { 2 * n_head_kv },         flags);
++                bf.mix       = create_tensor(tn(LLM_TENSOR_BIFROST_MIX,       il), { n_embd, n_head },        flags);
++                bf.mix_b     = create_tensor(tn(LLM_TENSOR_BIFROST_MIX_B,     il), { n_head },                flags);
++                bf.mix_lse   = create_tensor(tn(LLM_TENSOR_BIFROST_MIX_LSE,   il), { n_head },                flags);
++                bf.mem_scale = create_tensor(tn(LLM_TENSOR_BIFROST_MEM_SCALE, il), { n_head },                flags);
++                bf.a         = create_tensor(tn(LLM_TENSOR_BIFROST_A,         il), { n_head_kv },             flags);
++                bf.dt        = create_tensor(tn(LLM_TENSOR_BIFROST_DT,        il), { n_head_kv },             flags);
++            }
+         } else {
+             // Linear attention (gated delta net) specific tensors
+             // Create tensors with calculated dimensions
+@@ -155,6 +195,71 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * inp_pos     = build_inp_pos();
+     ggml_tensor * inp_out_ids = build_inp_out_ids();
+ 
++    llm_graph_input_bifrost * bi = nullptr;
++    if (hparams.bifrost_window > 0) {
++        const int64_t T = ubatch.n_seq_tokens, B = ubatch.n_seqs, S = hparams.bifrost_sinks, W = hparams.bifrost_window;
++        const int64_t R = n_head / n_head_kv;
++        const bool inplace = llm_graph_input_bifrost::can_inplace(inp->get_recr()->mctx, B);
++        const int64_t GD = n_head_kv * hparams.n_embd_head_k(), L = hparams.bifrost_region();
++        auto b = std::make_unique<llm_graph_input_bifrost>(W, S, R, GD, L, T, B, inplace);
++        const bool dec = T == 1;
++        b->kq_mask  = dec ? ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, hparams.bifrost_region(), 1, 1, B)
++                          : ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, S + W + T, T, 1, B);
++        b->m_sink   = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, T * B);
++        b->m_win    = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, T * B);
++        b->idx_ring = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, dec ? 1 : W, B);
++        std::vector<ggml_tensor *> ins = { b->kq_mask, b->m_sink, b->m_win, b->idx_ring };
++        b->idx_wb   = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, std::min(T, W), B);
++        b->idx_v_wb = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, GD * std::min(T, W), B);
++        ins.insert(ins.end(), { b->idx_wb, b->idx_v_wb });
++        if (dec) {
++            b->idx_sink1 = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 1, B);
++            b->idx_v_s1  = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, GD, B);
++            ins.insert(ins.end(), { b->idx_sink1, b->idx_v_s1 });
++        } else {
++            b->sink_idx = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, S * B);
++            b->sink_sel = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, S, B);
++            ins.insert(ins.end(), { b->sink_idx, b->sink_sel });
++        }
++        for (auto * t : ins) {
++            ggml_set_input(t);
++        }
++        bi = (llm_graph_input_bifrost *) res->add_input(std::move(b));
++    }
++
++    // Bifrost retrieval attention for the full-attention layers left unconverted (env BIFROST_RET)
++    llm_graph_input_bifrost_ret * ri = nullptr;
++    if (const auto & rc = llama_bifrost_ret_cfg(); rc.on() && cparams.n_seq_max == 1 && !cparams.training) {
++        int il0 = -1;
++        for (int il = 0; il < n_layer && il0 < 0; ++il) {
++            il0 = !hparams.is_recr(il) && !hparams.is_bifrost(il) ? il : -1;
++        }
++        const llama_kv_cache_context * kvc = inp->get_attn()->mctx;
++        if (il0 >= 0 && kvc->get_ksum(il0) != nullptr) {
++            const int64_t L = rc.block, S = rc.sinks, T = ubatch.n_tokens;
++            const int64_t n_blk_k = kvc->get_ksum(il0)->ne[1] - 1;
++            const int64_t n_blk_u = std::clamp<int64_t>(((int64_t) kvc->get_n_kv() - S) / L, 1, n_blk_k);
++            const bool    dec     = !kvc->get_v_trans() && llm_graph_input_bifrost_ret::decode_active(rc, ubatch, n_blk_u);
++            const int64_t n_upd   = (T + L - 1) / L + 1;
++            auto r = std::make_unique<llm_graph_input_bifrost_ret>(rc, n_head / n_head_kv, n_upd, n_blk_k, n_blk_u, dec);
++            r->upd_dst  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_upd);
++            r->upd_src  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_upd);
++            r->upd_mask = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, L, 1, n_upd);
++            std::vector<ggml_tensor *> ins = { r->upd_dst, r->upd_src, r->upd_mask };
++            if (dec) {
++                const int64_t M = S + rc.window + L + rc.k * L;
++                r->cand    = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_blk_u);
++                r->idx_sw  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, S + rc.window + L);
++                r->kq_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, M, n_head / n_head_kv);
++                ins.insert(ins.end(), { r->cand, r->idx_sw, r->kq_mask });
++            }
++            for (auto * t : ins) {
++                ggml_set_input(t);
++            }
++            ri = (llm_graph_input_bifrost_ret *) res->add_input(std::move(r));
++        }
++    }
++
+     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
+     for (int il = 0; il < n_layer; ++il) {
+         res->t_layer_inp[il] = inpL;
+@@ -167,12 +272,15 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+         ggml_build_forward_expand(gf, cur);
+ 
+         // Determine layer type and build appropriate attention mechanism
+-        if (hparams.is_recr(il)) {
++        if (hparams.is_bifrost(il)) {
++            // Bifrost: window + sinks + delayed-write delta memory (constant state)
++            cur = build_layer_bifrost(inp->get_recr(), bi, cur, inp_pos, sections, il);
++        } else if (hparams.is_recr(il)) {
+             // Linear attention layer (gated delta net)
+             cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+         } else {
+             // Full attention layer
+-            cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
++            cur = build_layer_attn(inp->get_attn(), ri, cur, inp_pos, sections, il);
+         }
+ 
+         if (il == n_layer - 1 && crop_before_nextn(inp_out_ids)) {
+@@ -265,6 +373,7 @@ ggml_tensor * llama_model_qwen35::graph::build_norm_gated(
+ 
+ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
+         llm_graph_input_attn_kv * inp,
++        llm_graph_input_bifrost_ret * ri,
+         ggml_tensor *             cur,
+         ggml_tensor *             inp_pos,
+         int *                     sections,
+@@ -327,9 +436,13 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
+     // Attention computation
+     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
+ 
+-    cur = build_attn(inp,
+-                nullptr, nullptr, nullptr,
+-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
++    if (ri) {
++        cur = build_attn_ret(inp, ri, Qcur, Kcur, Vcur, kq_scale, il);
++    } else {
++        cur = build_attn(inp,
++                    nullptr, nullptr, nullptr,
++                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
++    }
+     cb(cur, "attn_pregate", il);
+ 
+     ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
+@@ -661,3 +774,509 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+ 
+     res->t_logits = cur;
+ }
++
++// ---------------------------------------------------------------------------------------------------------------------
++// Bifrost (Valerois): a full-attention layer converted to
++//     o = o_win + gamma * (mem_scale * o_mem - o_win),   y = W_o (o * sigmoid(gate))
++//   o_win : softmax attention over the S sink tokens + the last W tokens (the teacher's own q/k/v, exact inside W)
++//   o_mem : gated delta rule; token j is written when it leaves the window (t = j + W); one state per query head
++//   gamma : sigmoid(W_mix x + mix_lse * (lse_win - log W)) for pos >= W, else 0
++// Per-sequence state (recurrent memory row "cache_bifrost_l"):
++//   region [L rows of C]: sinks | ring of W+1 slots (slot = S + pos mod (W+1)) | scratch + padding;  delta [D, D, G]
++//   (L = S + W + 2 rounded up to a multiple of 32)
++// The ring has one slot more than the window, so the row leaving the window (pos - W) and the row written by the
++// current token never share a slot. The delta state is kept per KV head: all query heads of a group share it.
++// Reference implementation and tests: Heimdall/heimdall/hibrit.py (HybridAttention._student).
++
++bool llm_graph_input_bifrost::can_inplace(const llama_memory_recurrent_context * mctx, int64_t n_seqs) {
++    if (mctx == nullptr || mctx->get_rs_z() >= 0 || (int64_t) mctx->get_n_rs() != n_seqs) {
++        return false;
++    }
++    for (int64_t i = 0; i < n_seqs; ++i) {
++        if (mctx->s_copy(i) != (int32_t) (mctx->get_head() + i)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++void llm_graph_input_bifrost::set_input(const llama_ubatch * ubatch) {
++    const int64_t T = ubatch->n_seq_tokens, B = ubatch->n_seqs, W = window, S = sinks, WR = W + 1;
++    GGML_ASSERT(ubatch->n_tokens == T * B);
++    const bool    dec  = T == 1;
++    const int64_t L    = dec ? n_slots : S + W + T;       // decode: region slots | prefill: sinks + time-ordered ring + new
++    const int64_t rows = T;
++    const int64_t scratch = S + WR;                        // slots from here on (scratch, padding) are never attended
++    auto slot = [&](int64_t pos) { return (int32_t) (S + ((pos % WR) + WR) % WR); };
++
++    std::vector<float>   mask(L * rows * B), ms(T * B), mw(T * B), sel(S * B, 0.0f);
++    std::vector<int32_t> sidx(S * B, 0), ring((dec ? 1 : W) * B), wb(std::min(T, W) * B), s1(B);
++
++    for (int64_t s = 0; s < B; ++s) {
++        const int64_t p0 = ubatch->pos[s * T];
++        for (int64_t t = 0; t < T; ++t) {
++            GGML_ASSERT(ubatch->pos[s * T + t] == p0 + t && "bifrost: positions must be consecutive within a sequence");
++            const int64_t q = p0 + t;
++            float * row = mask.data() + (s * rows + t) * L;
++            for (int64_t l = 0; l < L; ++l) {
++                bool ok;
++                if (l < S) {
++                    ok = l <= q;                                       // sink slot l holds position l
++                } else if (dec) {
++                    if (l >= scratch) {
++                        ok = false;
++                    } else {                                           // ring slot r holds the latest position = r (mod W+1)
++                        const int64_t r = l - S, kp = q - ((q - r) % WR + WR) % WR;
++                        ok = kp >= 0 && kp >= S && q - kp < W;
++                    }
++                } else {
++                    const int64_t kp = p0 - W + (l - S);               // time-ordered ring, then this ubatch's tokens
++                    ok = kp >= 0 && kp >= S && kp <= q && q - kp < W;
++                }
++                row[l] = ok ? 0.0f : -INFINITY;
++            }
++            ms[s * T + t] = q >= S ? 1.0f : 0.0f;
++            mw[s * T + t] = q >= W ? 1.0f : 0.0f;
++        }
++        if (dec) {
++            ring[s] = slot(p0 - W);                                    // row leaving the window (read)
++            wb[s]   = slot(p0);                                        // this token's row (write)
++            s1[s]   = (int32_t) (p0 < S ? p0 : scratch);
++        } else {
++            for (int64_t m = 0; m < W; ++m) {
++                ring[s * W + m] = slot(p0 - W + m);
++            }
++            const int64_t n = std::min(T, W);
++            for (int64_t m = 0; m < n; ++m) {
++                wb[s * n + m] = slot(p0 + T - n + m);
++            }
++        }
++        for (int64_t j = 0; j < S; ++j) {
++            if (j >= p0 && j < p0 + T) {
++                sidx[s * S + j] = (int32_t) (s * T + (j - p0));
++                sel[s * S + j]  = 1.0f;
++            }
++        }
++    }
++    ggml_backend_tensor_set(kq_mask,  mask.data(), 0, ggml_nbytes(kq_mask));
++    ggml_backend_tensor_set(m_sink,   ms.data(),   0, ggml_nbytes(m_sink));
++    ggml_backend_tensor_set(m_win,    mw.data(),   0, ggml_nbytes(m_win));
++    // V plane element indices: for every written row m and channel e = d + D*g, slot + L*e
++    const int64_t nw = std::min(T, W);
++    std::vector<int32_t> vwb(n_kv_ch * nw * B), vs1(dec ? n_kv_ch * B : 0);
++    for (int64_t s = 0; s < B; ++s) {
++        for (int64_t m = 0; m < nw; ++m) {
++            for (int64_t e = 0; e < n_kv_ch; ++e) {
++                vwb[(s * nw + m) * n_kv_ch + e] = (int32_t) (wb[s * nw + m] + n_slots * e);
++            }
++        }
++        if (dec) {
++            for (int64_t e = 0; e < n_kv_ch; ++e) {
++                vs1[s * n_kv_ch + e] = (int32_t) (s1[s] + n_slots * e);
++            }
++        }
++    }
++    ggml_backend_tensor_set(idx_ring, ring.data(), 0, ggml_nbytes(idx_ring));
++    ggml_backend_tensor_set(idx_wb,   wb.data(),   0, ggml_nbytes(idx_wb));
++    ggml_backend_tensor_set(idx_v_wb, vwb.data(),  0, ggml_nbytes(idx_v_wb));
++    if (dec) {
++        ggml_backend_tensor_set(idx_sink1, s1.data(), 0, ggml_nbytes(idx_sink1));
++        ggml_backend_tensor_set(idx_v_s1,  vs1.data(), 0, ggml_nbytes(idx_v_s1));
++    } else {
++        ggml_backend_tensor_set(sink_idx, sidx.data(), 0, ggml_nbytes(sink_idx));
++        ggml_backend_tensor_set(sink_sel, sel.data(),  0, ggml_nbytes(sink_sel));
++    }
++}
++
++bool llm_graph_input_bifrost::can_reuse(const llm_graph_params & params) {
++    const auto * mctx = static_cast<const llama_memory_hybrid_context *>(params.mctx)->get_recr();
++    return params.ubatch.n_seq_tokens == n_seq_tokens && params.ubatch.n_seqs == n_seqs &&
++           can_inplace(mctx, n_seqs) == inplace;
++}
++
++ggml_tensor * llama_model_qwen35::graph::build_layer_bifrost(
++        llm_graph_input_rs *      inp,
++        llm_graph_input_bifrost * bi,
++        ggml_tensor *             cur,
++        ggml_tensor *             inp_pos,
++        int *                     sections,
++        int                       il) {
++    const auto & layer = model.layers[il];
++    const auto & bf    = layer.bifrost;
++
++    const int64_t D = hparams.n_embd_head_k();
++    const int64_t H = n_head, G = n_head_kv, R = H / G;
++    const int64_t W = hparams.bifrost_window, S = hparams.bifrost_sinks;
++    const int64_t T = ubatch.n_seq_tokens, B = ubatch.n_seqs;
++    const int64_t C = hparams.bifrost_ring_ch();
++    const int64_t GD = G * D;
++    const int64_t LR = hparams.bifrost_region();    // region slots: sinks | ring (W+1) | scratch + padding
++    const size_t  f4 = sizeof(float);
++    const bool    dec = T == 1;
++    const bool    one = n_tokens == 1;              // single token, single sequence: most permutes are free reshapes
++
++    GGML_ASSERT(bi != nullptr && S > 0 && bi->n_rep == R);
++    GGML_ASSERT(ubatch.equal_seqs() && ubatch.n_tokens == T * B);
++    GGML_ASSERT(cparams.n_rs_seq == 0 && "bifrost: recurrent rollback (MTP draft) is not supported yet");
++
++    ggml_tensor * x = cur;  // [n_embd, n_tokens]
++
++    // ---- teacher projections (unchanged): q + gate, k, v, QK-norm, partial M-RoPE
++    auto [Qcur_full, Kcur, Vcur] = build_qkv(layer, cur, D * 2, H, D, G, D, G, il, false);
++    const size_t es = ggml_element_size(Qcur_full);
++    ggml_tensor * Qn = ggml_view_3d(ctx0, Qcur_full, D, H, n_tokens, es * D * 2, es * D * 2 * H, 0);
++    Qn = build_norm(Qn, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
++    ggml_tensor * gate = ggml_view_3d(ctx0, Qcur_full, D, H, n_tokens, es * D * 2, es * D * 2 * H, es * D);
++    gate = ggml_cont_2d(ctx0, gate, D * H, n_tokens);
++    ggml_tensor * Kn = build_norm(ggml_reshape_3d(ctx0, Kcur, D, G, n_tokens), layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
++
++    ggml_tensor * Qr = ggml_rope_multi(ctx0, Qn, inp_pos, nullptr, n_rot, sections, rope_type, n_ctx_orig, freq_base,
++                                       freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
++    ggml_tensor * Kr = ggml_rope_multi(ctx0, Kn, inp_pos, nullptr, n_rot, sections, rope_type, n_ctx_orig, freq_base,
++                                       freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
++
++    // ---- memory inputs: qm = l2norm(F_q q), km = l2norm(F_k k) (pre-RoPE), g = A * softplus(a + dt), beta = sigma(b)
++    const float eps = hparams.f_norm_rms_eps;
++    auto per_head = [&](ggml_tensor * w, ggml_tensor * z) {   // z [D, h, n] -> w_h z_h, [D, h, n]
++        const int64_t hh = z->ne[1];
++        if (one) {
++            return ggml_reshape_3d(ctx0, ggml_mul_mat(ctx0, w, ggml_reshape_3d(ctx0, z, D, 1, hh)), D, hh, 1);
++        }
++        ggml_tensor * y = ggml_mul_mat(ctx0, w, ggml_cont(ctx0, ggml_permute(ctx0, z, 0, 2, 1, 3)));   // [D, n, h]
++        return ggml_cont(ctx0, ggml_permute(ctx0, y, 0, 2, 1, 3));
++    };
++    // decode reads the memory with a plain matmul, so the 1/sqrt(D) query scale of the delta rule is folded in here
++    ggml_tensor * qm = ggml_scale(ctx0, ggml_rms_norm(ctx0, per_head(bf.fq, Qn), eps / D), dec ? 1.0f / D : 1.0f / sqrtf(D));
++    ggml_tensor * km = build_gdn_l2_norm(ctx0, per_head(bf.fk, Kn), eps);                                // [D, G, n]
++
++    ggml_tensor * ab = ggml_add(ctx0, build_lora_mm(bf.ab, x), bf.ab_b);                                  // [2G, n]
++    ggml_tensor * g    = ggml_mul(ctx0, ggml_softplus(ctx0, ggml_add(ctx0,
++                             ggml_view_2d(ctx0, ab, G, n_tokens, ab->nb[1], 0), bf.dt)), bf.a);            // [G, n]
++    ggml_tensor * beta = ggml_mul(ctx0, ggml_view_2d(ctx0, ggml_sigmoid(ctx0, ab), G, n_tokens, ab->nb[1], G * f4),
++                                  bi->m_sink);                                                             // [G, n]
++
++    // one row per token: [k_rope | v | k_mem | g | beta]
++    ggml_tensor * F = ggml_concat(ctx0, ggml_reshape_2d(ctx0, Kr, GD, n_tokens), ggml_reshape_2d(ctx0, Vcur, GD, n_tokens), 0);
++    F = ggml_concat(ctx0, F, ggml_reshape_2d(ctx0, km, GD, n_tokens), 0);
++    F = ggml_concat(ctx0, F, g, 0);
++    F = ggml_concat(ctx0, F, beta, 0);                                                                   // [C, n]
++    GGML_ASSERT(F->ne[0] == C);
++    ggml_tensor * F3 = ggml_reshape_3d(ctx0, F, C, T, B);
++
++    // ---- recurrent state of the sequences in this ubatch:
++    //      region [C, LR] | K plane [D, LR, G] | transposed V plane [LR, D, G] | delta [D, D, G]
++    const auto * mctx_cur = inp->mctx;
++    const int64_t kv_head = mctx_cur->get_head();
++    ggml_tensor * b_all = mctx_cur->get_b_l(il);
++    const int64_t Nb = hparams.bifrost_state();
++    const size_t  off_kp    = LR * C * f4;
++    const size_t  off_vp    = off_kp + LR * GD * f4;
++    const size_t  off_delta = off_vp + LR * GD * f4;
++
++    // in place: the ubatch's states are read straight from the cache (no per-token copy of the whole state).
++    // Otherwise (new or copied sequences) the gathered source states are first copied whole into the destination
++    // cells; all writes below are made on views of that copy, which orders them after it.
++    ggml_tensor * dst = ggml_view_2d(ctx0, b_all, Nb, B, b_all->nb[1], kv_head * b_all->nb[1]);
++    ggml_tensor * st  = dst;
++    if (!bi->inplace) {
++        st  = build_rs(inp, b_all, Nb, B);
++        dst = ggml_cpy(ctx0, st, dst);
++    }
++    const size_t row = dst->nb[1];
++    ggml_tensor * reg_st = ggml_view_3d(ctx0, st, C, LR, B, C * f4, st->nb[1], 0);
++    ggml_tensor * reg    = ggml_view_3d(ctx0, dst, C, LR, B, C * f4, row, 0);                              // destination
++    ggml_tensor * kp     = ggml_view_4d(ctx0, dst, D, LR, G, B, D * f4, LR * D * f4, row, off_kp);
++    ggml_tensor * vp     = ggml_view_3d(ctx0, dst, 1, LR * GD, B, f4, row, off_vp);                       // element rows
++    ggml_tensor * s_old  = ggml_view_4d(ctx0, st, D, D, G, B, D * f4, D * D * f4, st->nb[1], off_delta);
++    if (B > 1) {
++        s_old = ggml_cont(ctx0, s_old);
++    }
++    ggml_tensor * s_dst  = ggml_view_4d(ctx0, dst, D, D, G, B, D * f4, D * D * f4, row, off_delta);
++
++    const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(D)) : hparams.f_attention_scale;
++    ggml_tensor * wrow;   // [C, T, B]: write rows for this ubatch (positions p - W)
++    ggml_tensor * kq;
++    ggml_tensor * Vt;     // [Lk, D, G, B]
++
++    if (dec) {
++        // decode: read the row leaving the window, write this token's row into another slot (no ordering needed);
++        // the planes get the same writes, then the attention reads them contiguously
++        wrow = ggml_get_rows(ctx0, reg_st, bi->idx_ring);                                               // [C, 1, B]
++        ggml_tensor * r1 = ggml_set_rows(ctx0, reg, F3, bi->idx_sink1);                                 // sink slot (or scratch)
++        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, r1, F3, bi->idx_wb));                         // ring slot
++
++        ggml_tensor * K1 = ggml_reshape_4d(ctx0, Kr, D, 1, G, B);
++        ggml_tensor * k1 = ggml_set_rows(ctx0, kp, K1, ggml_reshape_3d(ctx0, bi->idx_sink1, 1, 1, B));
++        ggml_tensor * Kg = ggml_set_rows(ctx0, k1, K1, ggml_reshape_3d(ctx0, bi->idx_wb, 1, 1, B));     // [D, LR, G, B]
++        ggml_tensor * V1 = ggml_reshape_3d(ctx0, Vcur, 1, GD, B);
++        ggml_tensor * v2 = ggml_set_rows(ctx0, ggml_set_rows(ctx0, vp, V1, bi->idx_v_s1), V1, bi->idx_v_wb);
++        Vt = ggml_view_4d(ctx0, v2, LR, D, G, B, LR * f4, LR * D * f4, v2->nb[2], 0);
++
++        // one query per head; the KV head of a group is broadcast (one column per matmul is the fast GPU path)
++        kq = ggml_mul_mat(ctx0, Kg, ggml_reshape_4d(ctx0, Qr, D, 1, H, B));                              // [LR, 1, H, B]
++    } else {
++        // prefill: ring in time order, then the new tokens; write back the last min(T, W) rows and the sinks
++        auto after = [&](ggml_tensor * z, ggml_tensor * dep) {   // orders a state write after a read it does not use
++            return ggml_add(ctx0, z, ggml_scale(ctx0, ggml_view_1d(ctx0, dep, 1, 0), 0.0f));
++        };
++        ggml_tensor * ring_time = ggml_get_rows(ctx0, reg_st, bi->idx_ring);                            // [C, W, B]
++        ggml_tensor * sink_old  = ggml_cont(ctx0, ggml_view_3d(ctx0, reg_st, 2 * GD, S, B, C * f4, st->nb[1], 0));
++        ggml_tensor * ext = ggml_concat(ctx0, ring_time, F3, 1);                                        // [C, W+T, B]
++        const int64_t n = std::min(T, W);
++        const size_t  o_last = (W + T - n) * ext->nb[1];
++        ggml_tensor * last = ggml_view_3d(ctx0, ext, C, n, B, ext->nb[1], ext->nb[2], o_last);
++        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, reg, after(ggml_cont(ctx0, last), sink_old), bi->idx_wb));
++        // planes: the same rows
++        ggml_tensor * k_last = ggml_cont(ctx0, ggml_permute(ctx0,
++            ggml_view_4d(ctx0, ext, D, G, n, B, D * f4, ext->nb[1], ext->nb[2], o_last), 0, 2, 1, 3));   // [D, n, G, B]
++        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, kp, k_last, ggml_reshape_3d(ctx0, bi->idx_wb, n, 1, B)));
++        ggml_tensor * v_last = ggml_cont(ctx0, ggml_view_3d(ctx0, ext, GD, n, B, ext->nb[1], ext->nb[2], o_last + GD * f4));
++        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, vp, ggml_reshape_3d(ctx0, v_last, 1, GD * n, B), bi->idx_v_wb));
++
++        ggml_tensor * cand = ggml_get_rows(ctx0, ggml_cont(ctx0, ggml_view_2d(ctx0, F, 2 * GD, n_tokens, F->nb[1], 0)), bi->sink_idx);
++        cand = ggml_reshape_3d(ctx0, cand, 2 * GD, S, B);
++        ggml_tensor * sink_new = ggml_add(ctx0, sink_old, ggml_mul(ctx0, ggml_sub(ctx0, cand, sink_old), bi->sink_sel));
++        ggml_build_forward_expand(gf, ggml_cpy(ctx0, sink_new, ggml_view_3d(ctx0, dst, 2 * GD, S, B, C * f4, row, 0)));
++        ggml_build_forward_expand(gf, ggml_cpy(ctx0,                                                     // K plane sinks
++            ggml_permute(ctx0, ggml_view_4d(ctx0, sink_new, D, G, S, B, D * f4, sink_new->nb[1], sink_new->nb[2], 0), 0, 2, 1, 3),
++            ggml_view_4d(ctx0, dst, D, S, G, B, D * f4, LR * D * f4, row, off_kp)));
++        ggml_build_forward_expand(gf, ggml_cpy(ctx0,                                                     // V plane sinks
++            ggml_permute(ctx0, ggml_view_4d(ctx0, sink_new, D, G, S, B, D * f4, sink_new->nb[1], sink_new->nb[2], GD * f4), 1, 2, 0, 3),
++            ggml_view_4d(ctx0, dst, S, D, G, B, LR * f4, LR * D * f4, row, off_vp)));
++
++        ggml_tensor * ext_kv = ggml_cont(ctx0, ggml_view_3d(ctx0, ext, 2 * GD, W + T, B, ext->nb[1], ext->nb[2], 0));
++        ggml_tensor * keys = ggml_concat(ctx0, sink_new, ext_kv, 1);                                     // [2GD, S+W+T, B]
++        wrow = ggml_view_3d(ctx0, ext, C, T, B, ext->nb[1], ext->nb[2], 0);
++
++        const int64_t Lk = keys->ne[1];
++        ggml_tensor * K4 = ggml_view_4d(ctx0, keys, D, G, Lk, B, D * f4, keys->nb[1], keys->nb[2], 0);
++        ggml_tensor * V4 = ggml_view_4d(ctx0, keys, D, G, Lk, B, D * f4, keys->nb[1], keys->nb[2], GD * f4);
++        Vt = ggml_cont(ctx0, ggml_permute(ctx0, V4, 1, 2, 0, 3));                                       // [Lk, D, G, B]
++        ggml_tensor * Kt = ggml_cont(ctx0, ggml_permute(ctx0, K4, 0, 2, 1, 3));                          // [D, Lk, G, B]
++        ggml_tensor * Qt = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_4d(ctx0, Qr, D, H, T, B), 0, 2, 1, 3)); // [D, T, H, B]
++        kq = ggml_mul_mat(ctx0, Kt, Qt);                                                                 // [Lk, T, H, B]
++    }
++    ggml_prec_set_acc(kq, GGML_PREC_F32);
++    ggml_tensor * p  = ggml_soft_max_ext(ctx0, kq, bi->kq_mask, kq_scale, 0.0f);
++    // log-sum-exp of the window: lse = E_p[s] + H(p)   (masked entries have p = 0)
++    ggml_tensor * lse = ggml_sub(ctx0,
++        ggml_sum_rows(ctx0, ggml_mul(ctx0, p, ggml_scale(ctx0, kq, kq_scale))),
++        ggml_sum_rows(ctx0, ggml_mul(ctx0, p, ggml_log(ctx0, ggml_clamp(ctx0, p, 1e-30f, 1.0f)))));
++    ggml_tensor * o_win = ggml_mul_mat(ctx0, Vt, p);
++    ggml_tensor * lse2;                                                                                  // [H, n]
++    if (dec) {                                                // [D, 1, H, B] = [D, H, 1, B]: already in token order
++        lse2 = ggml_reshape_2d(ctx0, lse, H, n_tokens);
++    } else {                                                  // [D, T, H, B] -> [D, H, T, B]
++        o_win = ggml_cont(ctx0, ggml_permute(ctx0, o_win, 0, 2, 1, 3));
++        lse2  = ggml_reshape_2d(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, lse, T, H, B), 1, 0, 2, 3)), H, n_tokens);
++    }
++
++    // ---- memory: write rows (positions p0-W ..), one delta state per KV head
++    auto part = [&](int64_t d, size_t off) {                  // [d, G, T, B] view of the write rows
++        return ggml_view_4d(ctx0, wrow, d, G, T, B, d * f4, wrow->nb[1], wrow->nb[2], off);
++    };
++    ggml_tensor * o_mem;                                                                                 // [D, H, n]
++    ggml_tensor * s_new;
++    if (dec) {
++        // update the G states with the leaving rows, then read them with all R query heads of each group
++        ggml_tensor * wk = part(D, 2 * GD * f4);
++        ggml_tensor * wg = part(1, 3 * GD * f4);
++        ggml_tensor * wb = part(1, (3 * GD + G) * f4);
++        if (B > 1) {
++            wg = ggml_cont(ctx0, wg);
++            wb = ggml_cont(ctx0, wb);
++        }
++        auto res = build_delta_net(wk, wk, part(D, GD * f4), wg, wb, s_old, il);
++        s_new = res.second;                                                                              // [D, D, G, B]
++        o_mem = ggml_mul_mat(ctx0, s_new, ggml_reshape_4d(ctx0, qm, D, R, G, B));                        // [D, R, G, B]
++    } else {
++        // prefill needs every intermediate state: run the delta rule on H heads (states repeated per query head)
++        auto expand = [&](ggml_tensor * z) {                  // [d, G, T, B] -> [d, H, T, B], h = g*R + r
++            const int64_t d = z->ne[0];
++            z = ggml_reshape_4d(ctx0, ggml_cont(ctx0, z), d, 1, G, T * B);
++            return ggml_reshape_4d(ctx0, ggml_repeat_4d(ctx0, z, d, R, G, T * B), d, H, T, B);
++        };
++        ggml_tensor * s_rep = ggml_reshape_4d(ctx0,
++            ggml_repeat_4d(ctx0, ggml_reshape_4d(ctx0, s_old, D * D, 1, G, B), D * D, R, G, B), D, D, H, B);
++        auto res = build_delta_net(ggml_reshape_4d(ctx0, qm, D, H, T, B), expand(part(D, 2 * GD * f4)),
++                                   expand(part(D, GD * f4)), expand(part(1, 3 * GD * f4)),
++                                   expand(part(1, (3 * GD + G) * f4)), s_rep, il);
++        o_mem = res.first;                                                                               // [D, H, T, B]
++        s_new = ggml_view_4d(ctx0, res.second, D, D, G, B, res.second->nb[1], R * res.second->nb[2],
++                             res.second->nb[3], 0);                                                      // head r = 0 of each group
++    }
++    ggml_build_forward_expand(gf, ggml_cpy(ctx0, s_new, s_dst));
++
++    // ---- mix
++    ggml_tensor * mix = ggml_add(ctx0, build_lora_mm(bf.mix, x), bf.mix_b);                              // [H, n]
++    lse2 = ggml_scale_bias(ctx0, lse2, 1.0f, -logf((float) W));
++    ggml_tensor * gamma = ggml_sigmoid(ctx0, ggml_add(ctx0, mix, ggml_mul(ctx0, lse2, bf.mix_lse)));
++    gamma = ggml_mul(ctx0, gamma, bi->m_win);                                                           // [H, n]
++    static const bool mem_off = getenv("BIFROST_MEM_OFF") != nullptr;   // diagnosis: window + sinks only
++    if (mem_off) {
++        gamma = ggml_scale(ctx0, gamma, 0.0f);
++    }
++
++    ggml_tensor * ow = ggml_reshape_3d(ctx0, o_win, D, H, n_tokens);
++    ggml_tensor * om = ggml_reshape_3d(ctx0, o_mem, D, H, n_tokens);
++    om = ggml_mul(ctx0, om, ggml_reshape_2d(ctx0, bf.mem_scale, 1, H));
++    ggml_tensor * o = ggml_add(ctx0, ow, ggml_mul(ctx0, ggml_sub(ctx0, om, ow), ggml_reshape_3d(ctx0, gamma, 1, H, n_tokens)));
++    cb(o, "bifrost_o", il);
++
++    o = ggml_mul(ctx0, ggml_reshape_2d(ctx0, o, D * H, n_tokens), ggml_sigmoid(ctx0, gate));
++    return build_lora_mm(layer.wo, o, layer.wo_s);
++}
++
++// ---------------------------------------------------------------------------------------------------------------------
++// Bifrost retrieval attention (llm_graph_input_bifrost_ret in models.h). Block b of a layer = cells [S + b*L, S + (b+1)*L).
++
++bool llm_graph_input_bifrost_ret::decode_active(const llama_bifrost_ret & cfg, const llama_ubatch & ub, int64_t n_blk_u) {
++    if (ub.n_tokens != 1 || ub.n_seqs != 1) {
++        return false;
++    }
++    const int64_t first = (int64_t) ub.pos[0] - cfg.window + 1 - cfg.sinks;    // cells before the window, after the sinks
++    return first >= (int64_t) cfg.k * cfg.block && first / cfg.block <= n_blk_u;
++}
++
++void llm_graph_input_bifrost_ret::set_input(const llama_ubatch * ub) {
++    const int64_t L = cfg.block, S = cfg.sinks, W = cfg.window, T = ub->n_tokens;
++    const int64_t p0 = ub->pos[0], p1 = ub->pos[T - 1];
++    for (int64_t t = 0; t < T; ++t) {
++        GGML_ASSERT(ub->pos[t] == p0 + t && "bifrost retrieval: one sequence with consecutive positions");
++    }
++    // summary rows to rewrite: every block this ubatch wrote into (cells past p1 masked out); spare row otherwise
++    std::vector<int32_t> dst(n_upd, (int32_t) n_blk_k), src(n_upd, 0);
++    std::vector<float>   um(L * n_upd, 0.0f);
++    if (p1 >= S) {
++        const int64_t b0 = (std::max(p0, S) - S) / L, b1 = std::min((p1 - S) / L, n_blk_k - 1);
++        for (int64_t b = b0, i = 0; b <= b1 && i < n_upd; ++b, ++i) {
++            dst[i] = src[i] = (int32_t) b;
++            for (int64_t j = 0; j < L; ++j) {
++                um[i * L + j] = S + b * L + j <= p1 ? 0.0f : -INFINITY;
++            }
++        }
++    }
++    ggml_backend_tensor_set(upd_dst,  dst.data(), 0, ggml_nbytes(upd_dst));
++    ggml_backend_tensor_set(upd_src,  src.data(), 0, ggml_nbytes(upd_src));
++    ggml_backend_tensor_set(upd_mask, um.data(),  0, ggml_nbytes(upd_mask));
++    if (!dec) {
++        return;
++    }
++    // candidates: the nc blocks that end before the window; the window runs from the next block boundary to p
++    const int64_t p = p0, nc = (p - W + 1 - S) / L, ws = S + nc * L, SW = S + W + L, M = SW + cfg.k * L;
++    std::vector<float>   cd(n_blk_u), km(M * n_rep);
++    std::vector<int32_t> sw(SW, 0);
++    for (int64_t b = 0; b < n_blk_u; ++b) {
++        cd[b] = b < nc ? 0.0f : -INFINITY;
++    }
++    for (int64_t j = 0; j < S; ++j) {
++        sw[j] = (int32_t) j;
++    }
++    for (int64_t c = ws; c <= p; ++c) {
++        sw[S + c - ws] = (int32_t) c;
++    }
++    for (int64_t m = 0; m < M; ++m) {
++        const bool ok = m < S || m >= SW || m - S <= p - ws;
++        km[m] = ok ? 0.0f : -INFINITY;
++    }
++    for (int64_t r = 1; r < n_rep; ++r) {
++        std::copy(km.begin(), km.begin() + M, km.begin() + r * M);
++    }
++    ggml_backend_tensor_set(cand,    cd.data(), 0, ggml_nbytes(cand));
++    ggml_backend_tensor_set(idx_sw,  sw.data(), 0, ggml_nbytes(idx_sw));
++    ggml_backend_tensor_set(kq_mask, km.data(), 0, ggml_nbytes(kq_mask));
++}
++
++bool llm_graph_input_bifrost_ret::can_reuse(const llm_graph_params & params) {
++    const auto * kvc = static_cast<const llama_memory_hybrid_context *>(params.mctx)->get_attn();
++    const int64_t L = cfg.block, S = cfg.sinks, T = params.ubatch.n_tokens;
++    const int64_t nbu = std::clamp<int64_t>(((int64_t) kvc->get_n_kv() - S) / L, 1, n_blk_k);
++    const bool    d   = !kvc->get_v_trans() && decode_active(cfg, params.ubatch, nbu);
++    return params.ubatch.n_seqs == 1 && (T + L - 1) / L + 1 == n_upd && nbu == n_blk_u && d == dec;
++}
++
++ggml_tensor * llama_model_qwen35::graph::build_attn_ret(
++        llm_graph_input_attn_kv *     inp,
++        llm_graph_input_bifrost_ret * ri,
++        ggml_tensor *                 q_cur,
++        ggml_tensor *                 k_cur,
++        ggml_tensor *                 v_cur,
++        float                         kq_scale,
++        int                           il) {
++    const auto &  rc = ri->cfg;
++    const int64_t D = hparams.n_embd_head_k(il), G = n_head_kv, GD = D * G, R = ri->n_rep;
++    const int64_t L = rc.block, S = rc.sinks, K = rc.k, SW = S + rc.window + L;
++
++    if (inp->self_k_rot[il]) {
++        q_cur = llama_mul_mat_hadamard(ctx0, q_cur, inp->self_k_rot[il]);
++        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot[il]);
++    }
++    if (inp->self_v_rot[il]) {
++        v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot[il]);
++    }
++    ggml_build_forward_expand(gf, q_cur);
++    ggml_build_forward_expand(gf, v_cur);
++    ggml_build_forward_expand(gf, k_cur);
++
++    const auto *  mctx = inp->mctx;
++    ggml_tensor * k_st = mctx->cpy_k(ctx0, k_cur, inp->get_k_idxs(), il);   // the whole K tensor, after this ubatch
++    ggml_tensor * v_st = mctx->cpy_v(ctx0, v_cur, inp->get_v_idxs(), il);
++    ggml_build_forward_expand(gf, k_st);
++    ggml_build_forward_expand(gf, v_st);
++    const int64_t kv_size = mctx->get_k_raw(il)->ne[1];
++    auto blocks = [&](ggml_tensor * st) {          // [GD*L, n_blk_k]: one row per block (all heads)
++        return ggml_view_2d(ctx0, st, GD * L, ri->n_blk_k, ggml_row_size(st->type, GD * L), ggml_row_size(st->type, GD * S));
++    };
++
++    // re-pool the blocks this ubatch wrote into: per-head max and min of the keys over the block's cells
++    ggml_tensor * x = ggml_get_rows(ctx0, blocks(k_st), ri->upd_src);                       // [GD*L, n_upd]
++    x = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, x, GD, L, ri->n_upd), 1, 0, 2, 3));   // [L, GD, n_upd]
++    auto pool_max = [&](ggml_tensor * y) {                                                   // -> [D, n_upd, G]
++        y = ggml_add(ctx0, y, ri->upd_mask);
++        y = ggml_pool_1d(ctx0, ggml_reshape_2d(ctx0, y, L, GD * ri->n_upd), GGML_OP_POOL_MAX, L, L, 0);
++        return ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, y, D, G, ri->n_upd), 0, 2, 1, 3));
++    };
++    ggml_tensor * upd  = ggml_concat(ctx0, pool_max(x), ggml_neg(ctx0, pool_max(ggml_neg(ctx0, x))), 2);  // [D, n_upd, 2G]
++    ggml_tensor * ksum = ggml_set_rows(ctx0, mctx->get_ksum(il), upd, ri->upd_dst);        // [D, n_blk_k + 1, 2G]
++    ggml_build_forward_expand(gf, ksum);
++    cb(ksum, "ret_ksum", il);
++
++    ggml_tensor * cur;
++    if (!ri->dec) {
++        cur = build_attn_mha(q_cur, mctx->get_k(ctx0, il), mctx->get_v(ctx0, il), nullptr, inp->get_kq_mask(),
++                             nullptr, nullptr, 0, kq_scale, il);
++    } else {
++        // block scores: upper bound of q.k = relu(q).kmax + min(q, 0).kmin, the max over the query heads of a group
++        ggml_tensor * q    = ggml_reshape_3d(ctx0, q_cur, D, R, G);
++        ggml_tensor * kmax = ggml_view_3d(ctx0, ksum, D, ri->n_blk_u, G, ksum->nb[1], ksum->nb[2], 0);
++        ggml_tensor * kmin = ggml_view_3d(ctx0, ksum, D, ri->n_blk_u, G, ksum->nb[1], ksum->nb[2], G * ksum->nb[2]);
++        ggml_tensor * qn   = ggml_neg(ctx0, ggml_relu(ctx0, ggml_neg(ctx0, q)));
++        ggml_tensor * ub   = ggml_add(ctx0, ggml_mul_mat(ctx0, kmax, ggml_relu(ctx0, q)), ggml_mul_mat(ctx0, kmin, qn));  // [n_blk_u, R, G]
++        ub = ggml_cont(ctx0, ggml_permute(ctx0, ub, 1, 0, 2, 3));                            // [R, n_blk_u, G]
++        ub = ggml_pool_1d(ctx0, ggml_reshape_2d(ctx0, ub, R, ri->n_blk_u * G), GGML_OP_POOL_MAX, R, R, 0);
++        ub = ggml_add(ctx0, ggml_reshape_2d(ctx0, ub, ri->n_blk_u, G), ri->cand);           // [n_blk_u, G]
++        ggml_tensor * top = ggml_reshape_1d(ctx0, ggml_top_k(ctx0, ub, K), K * G);          // pick k + K*g: head g's block
++        cb(top, "ret_top", il);
++
++        // gather sinks + window + the picked blocks (whole blocks are fetched; each head keeps its own picks)
++        auto gather = [&](ggml_tensor * st) {                                                // -> [D, SW + K*L, G] F32
++            ggml_tensor * g = ggml_get_rows(ctx0, blocks(st), top);                          // [GD*L, K*G]
++            const size_t  e = ggml_element_size(g);
++            g = ggml_view_4d(ctx0, g, D, L, K, G, GD * e, GD * L * e, (D + K * GD * L) * e, 0);
++            g = ggml_reshape_3d(ctx0, ggml_cont(ctx0, g), D, L * K, G);
++            ggml_tensor * w = ggml_get_rows(ctx0, ggml_view_2d(ctx0, st, GD, kv_size, ggml_row_size(st->type, GD), 0), ri->idx_sw);
++            w = ggml_cont(ctx0, ggml_permute(ctx0, ggml_reshape_3d(ctx0, w, D, G, SW), 0, 2, 1, 3));   // [D, SW, G]
++            return ggml_concat(ctx0, w, g, 1);
++        };
++        ggml_tensor * k  = gather(k_st);
++        ggml_tensor * vt = ggml_cont(ctx0, ggml_permute(ctx0, gather(v_st), 1, 0, 2, 3));    // [M, D, G]
++        ggml_tensor * kq = ggml_soft_max_ext(ctx0, ggml_mul_mat(ctx0, k, q), ri->kq_mask, kq_scale, 0.0f);  // [M, R, G]
++        cur = ggml_reshape_2d(ctx0, ggml_mul_mat(ctx0, vt, kq), D * R * G, 1);              // [D*H, 1]
++    }
++    cb(cur, "kqv_out", il);
++
++    if (inp->self_v_rot[il]) {
++        cur = llama_mul_mat_hadamard(ctx0, cur, inp->self_v_rot[il]);
++    }
++    return cur;
++}
