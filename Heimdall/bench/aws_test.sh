@@ -4,7 +4,7 @@
 #   3) Qwen3-8B Bifrost dönüşümü sığıyor mu, saniyede kaç token?  (tepe GPU belleği ve hız yazılır)
 #
 # Kurulum (Deep Learning AMI, PyTorch'lu ortam etkin):
-#   git clone https://github.com/valeroisai/bifrost.git && cd bifrost/Heimdall
+#   git clone https://github.com/valeroisai/heimdall.git && cd heimdall/Heimdall
 #   pip install numpy tokenizers safetensors huggingface_hub pyarrow transformers accelerate   # (torch AMI'de var)
 #   bash bench/aws_test.sh                   # tümü
 #   ADIM=hiz bash bench/aws_test.sh          # yalnız 337M hız/kayıp   (ADIM = test | hiz | dnsm)

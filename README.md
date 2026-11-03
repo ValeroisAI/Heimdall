@@ -243,7 +243,7 @@ Code comments, CLI flag names and some log messages are in Turkish (glossary in 
 ## Quick start
 
 ```bash
-git clone https://github.com/valeroisai/bifrost.git && cd bifrost/Heimdall
+git clone https://github.com/valeroisai/heimdall.git && cd heimdall/Heimdall
 python3 -m venv .venv && source .venv/bin/activate
 # AMD RX 9070 XT / ROCm 10.1 (the configuration we measured):
 pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1201]==2.14.0+rocm10.1.0"
@@ -297,6 +297,6 @@ Apache License 2.0, see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). The llama.c
   author = {{Valerois AI}},
   title  = {Bifrost and Heimdall: constant-memory conversion of pretrained language models on a single GPU},
   year   = {2026},
-  url    = {https://github.com/valeroisai/bifrost}
+  url    = {https://github.com/valeroisai/heimdall}
 }
 ```

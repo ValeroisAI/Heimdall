@@ -103,7 +103,7 @@ def main() -> None:
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--lmeval", help="bench/lmeval_heimdall.py --out çıktısı (model kartındaki tablo için)")
-    p.add_argument("--repo", default="valeroisai/bifrost", help="kod deposu (kart bağlantısı)")
+    p.add_argument("--repo", default="valeroisai/heimdall", help="kod deposu (kart bağlantısı)")
     p.add_argument("--hf-repo", default="valeroisai/heimdall-bit-337m")
     a = p.parse_args()
     ckpt = torch.load(a.ckpt, map_location="cpu", weights_only=False)
