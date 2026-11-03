@@ -357,7 +357,7 @@ def cmd_egit(a) -> None:
                 f.unlink()
             done_attn += 1
         torch.save({"conv": conv, "params": params, "mtp_hidden": "normed",
-                    "meta": {"model": a.model, "rapor": report, "son_katman": i, "motor": vars(a)}},
+                    "meta": {"model": a.model, "rapor": report, "son_katman": i, "motor": settings(a)}},
                    out / "donusum_param.pt")
         st_file.write_text(json.dumps({"next": i + 1}))
         del layer
@@ -422,6 +422,25 @@ def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
     return {"pencere": vw, "egitimsiz": v0, "egitilmis": v1}
 
 
+def settings(a) -> dict:
+    """Run settings as plain values (the argparse namespace also holds the command function, which must not be pickled:
+    run as `python -m`, it pickles as __main__.cmd_egit and no other program could load the file)."""
+    return {k: v for k, v in vars(a).items() if k != "fn"}
+
+
+def cmd_onar(a) -> None:
+    """Repair a donusum_param.pt saved before the fix (it held __main__.cmd_egit). Runs as __main__, so it loads."""
+    for f in a.files:
+        st = torch.load(f, map_location="cpu", weights_only=False)
+        mo = st.get("meta", {}).get("motor")
+        if isinstance(mo, dict) and "fn" in mo:
+            mo.pop("fn")
+            torch.save(st, f)
+            print(f"onarıldı: {f}")
+        else:
+            print(f"sorun yok: {f}")
+
+
 def cmd_plan(a) -> None:
     c = HybridConfig(Weights(fetch_model(a.model)).config)
     vram = torch.cuda.get_device_properties(0).total_memory / 2**30 if torch.cuda.is_available() else 16
@@ -455,6 +474,9 @@ def main() -> None:
             s.add_argument("--device", default=None)
             s.add_argument("--devam", action="store_true", help="yarıda kalan koşuyu kaldığı katmandan sür")
         s.set_defaults(fn=cmd_plan if nm == "plan" else cmd_egit)
+    s = sub.add_parser("onar", help="eski donusum_param.pt dosyasını başka programların açabileceği hale getir")
+    s.add_argument("files", nargs="+")
+    s.set_defaults(fn=cmd_onar)
     a = ap.parse_args()
     a.fn(a)
 

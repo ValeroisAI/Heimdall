@@ -215,6 +215,7 @@ case $ADIM in
           [ -f $O/donusum_param.pt ] && [ ! -f $O/motor_durum.json ] || $PY -m heimdall.motor egit --model $M \
             --train $V/wiki_train.bin --out $O --window 256 --seq ${SEQM:-16384} --kalib 16 --keep-every 0 \
             --adim 300 ${DEVAM:+--devam}
+          $PY -m heimdall.motor onar $O/donusum_param.pt      # düzeltmeden önce kaydedilmiş dosya için (zararsız)
           $PY bench/bifrost_param_ozet.py $O/donusum_param.pt
           [ -f $O/bifrost-f16.gguf ] || $PY llamacpp/bifrost_gguf.py --model $HFM --conv $O/donusum_param.pt \
             --llama $LLAMA --outtype f16 --out $O/bifrost-f16.gguf >/dev/null 2>&1
@@ -224,7 +225,7 @@ case $ADIM in
           $LLAMA/build/bin/llama-perplexity -m $O/bifrost-f16.gguf -f veri/wiki_test.txt -ngl 99 -c 4096 --chunks 8 \
             2>&1 | grep "Final estimate" || true ;;
   motor)  $PY -m heimdall.motor egit --model $MODEL --train $VERI/wiki_train.bin --out $OUT3 --window $PENCERE \
-            ${MOTOR_ARGS:-} ${DEVAM:+--devam} ;;
+            ${MOTOR_ARGS:-} ${DEVAM:+--devam} && $PY -m heimdall.motor onar $OUT3/donusum_param.pt ;;
   motortest)
           OUT2=$OUT3 ADIM=a2test bash "$SELF" && OUT2=$OUT3 ADIM=a2parola bash "$SELF" ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
