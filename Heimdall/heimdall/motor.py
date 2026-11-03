@@ -247,11 +247,24 @@ class HiddenStore:
 
 
 # --------------------------------------------------------------------------- plan
+def token_bytes(c: HybridConfig) -> int:
+    """Estimated GPU bytes per token at the peak of precompute (one layer, one sequence): the q/gate projection,
+    normed and roped q, teacher and window outputs (fp32) and the bf16 activations. An estimate, not a measurement:
+    27B (h*dh = 6144, d = 5120) gives ~185 KB/token, i.e. ~12 GB at 64K, too much next to the weights on 16 GB."""
+    return 24 * c.h * c.dh + 8 * c.d
+
+
+def layer_bytes(c: HybridConfig) -> int:
+    """bf16 weights of one dense layer (attention + MLP)."""
+    return 2 * (c.d * (2 * c.h * c.dh + 2 * c.hkv * c.dh) + c.h * c.dh * c.d + 3 * c.d * c.inter)
+
+
 def auto_plan(c: HybridConfig, vram_gb: float, seq: int | None, kalib: int | None, keep_every: int):
     attn = [i for i, k in enumerate(c.layer_types) if k == ATTN]
     keep = [f"layers.{i}" for n_, i in enumerate(attn) if keep_every and (n_ + 1) % keep_every == 0]
-    if seq is None:      # 64K, 16 GB'ta ölçüldüğü haliyle; daha az bellekte kısalır
-        seq = 65536 if vram_gb >= 15 else 32768 if vram_gb >= 11 else 16384
+    if seq is None:      # the longest sequence whose estimated per-layer peak fits in ~75% of the GPU
+        budget = 0.75 * vram_gb * 2**30 - layer_bytes(c) - 2**30
+        seq = next((t for t in (65536, 32768, 16384) if t * token_bytes(c) <= budget), 8192)
     if kalib is None:
         kalib = max(8, min(32, int(2 ** 20 / seq * 16)))                            # ~1M token
     return dict(seq=seq, kalib=kalib, keep=keep)
@@ -265,7 +278,8 @@ def plan_report(c, p, W, frac, seg) -> str:
     return (f"model: {c.n_layers} katman, {c.layer_types.count(ATTN)} tam dikkat → {conv} dönüştürülür, "
             f"{len(p['keep'])} kalır ({' '.join(p['keep']) or '-'})\n"
             f"kalibrasyon: {n} dizi × {T} token, pencere {W}, parça {seg}, kayıp oranı {frac}\n"
-            f"disk: gizli durumlar {gb(n * T * d * 2)} + katman önbelleği {gb(n * per)} (katman bitince silinir)")
+            f"disk: gizli durumlar {gb(n * T * d * 2)} + katman önbelleği {gb(n * per)} (katman bitince silinir)\n"
+            f"GPU (tahmin): katman ağırlığı {gb(layer_bytes(c))} + dizi başına tepe {gb(T * token_bytes(c))}")
 
 
 # --------------------------------------------------------------------------- eğitim
