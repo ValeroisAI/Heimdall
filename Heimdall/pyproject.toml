@@ -5,8 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "heimdall-lm"
 version = "1.0.0"
-description = "Heimdall: Gated DeltaNet + seyrek global dikkat hibrit dil modeli, eğitim ve OpenAI uyumlu servis (CUDA / ROCm)"
+description = "Heimdall and Bifrost: hybrid Gated DeltaNet language models, constant-memory conversion of pretrained Transformers, training and OpenAI-compatible serving (ROCm / CUDA)"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Valerois AI"}]
+readme = "README.md"
 dependencies = ["torch>=2.4", "numpy", "tokenizers>=0.15"]
 
 [project.optional-dependencies]

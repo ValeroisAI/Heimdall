@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Heimdall"))
-sys.path.insert(0, str(ROOT / "ESKI" / "08_BIFROST_H" / "bench"))
+sys.path.insert(0, str(ROOT / "OLD" / "08_BIFROST_H" / "bench"))
 
 from heimdall.io import load_model  # noqa: E402
 
@@ -47,11 +47,11 @@ def per_pos_loss(model, wins, dev, bs=8, bf16=False):
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True, help="Heimdall last.pt")
-    p.add_argument("--valkir", default=str(ROOT / "ESKI" / "Valkir.pt"))
+    p.add_argument("--valkir", default=str(ROOT / "OLD" / "Valkir.pt"))
     p.add_argument("--veri", required=True, help="uint16 .bin (ikisinin de görmediği veri)")
     p.add_argument("--n", type=int, default=200, help="pencere sayısı")
     p.add_argument("--schedule", default="const2", choices=["exp", "const2", "const1", "mod4"],
-                   help="Valkir dilatasyon çizelgesi. Valkir.pt SABİT dilatasyon 2 ile eğitildi (ESKI/08_BIFROST_H/DURUM.md); "
+                   help="Valkir dilatasyon çizelgesi. Valkir.pt SABİT dilatasyon 2 ile eğitildi (OLD/08_BIFROST_H/DURUM.md); "
                         "yanlış çizelge kaybı şişirir (üstel: 1.73, doğru: 0.72)")
     p.add_argument("--device", default=None)
     args = p.parse_args()

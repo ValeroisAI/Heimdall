@@ -6,6 +6,12 @@ from pathlib import Path
 
 os.environ["TRITON_INTERPRET"] = "1"
 import torch  # noqa: E402
+import pytest  # noqa: E402
+
+import importlib.util  # noqa: E402
+
+needs_triton = pytest.mark.skipif(importlib.util.find_spec("triton") is None,
+                                  reason="Triton is not installed (pip install triton; on CPU set TRITON_INTERPRET=1)")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from heimdall.bitkernel import int8_matmul, pack_weights, packed_matmul, unpack_weights  # noqa: E402
@@ -18,6 +24,7 @@ def test_pack_roundtrip():
             assert torch.equal(unpack_weights(pack_weights(w, bits), bits, k), w), (bits, k)
 
 
+@needs_triton
 def test_int8_matmul_exact():
     torch.manual_seed(0)
     for m, k, n in ((40, 200, 70), (3, 65, 17), (130, 64, 130)):
@@ -29,6 +36,7 @@ def test_int8_matmul_exact():
         assert torch.allclose(int8_matmul(xq, w, sx, sw), ref * sw[None], rtol=1e-6, atol=1e-4)
 
 
+@needs_triton
 def test_packed_matmul():
     torch.manual_seed(1)
     for bits, vals in ((1, [-1.0, 1.0]), (2, [-1.0, 0.0, 1.0])):

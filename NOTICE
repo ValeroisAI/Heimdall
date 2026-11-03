@@ -1,0 +1,15 @@
+Heimdall / Bifrost
+Copyright 2025-2026 Valerois AI
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party material:
+
+* Heimdall/llamacpp/bifrost.patch is a patch against llama.cpp
+  (https://github.com/ggml-org/llama.cpp), which is MIT-licensed,
+  Copyright (c) 2023-2026 The ggml authors. The patched files remain under
+  llama.cpp's MIT license, and the patch as a whole is distributed under that
+  MIT license so it can be merged upstream.
+* The Qwen models that Bifrost converts are published by their authors under
+  their own licenses (Qwen3.5 / Qwen3.8: Apache-2.0). Converted weights inherit
+  the base model's license terms.

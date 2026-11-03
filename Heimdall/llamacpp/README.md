@@ -6,7 +6,7 @@ per KV head (the query heads of a group share it). The DeltaNet and FFN layers u
 `ggml_gated_delta_net` op.
 
 * `bifrost.patch`: diff against the llama.cpp commit in `LLAMA_CPP_COMMIT` (upstream code is MIT, see its LICENSE). It touches
-  14 files (+554 lines) and applies cleanly on a fresh checkout. `kur.sh` clones, patches and builds (HIP / Vulkan / CPU).
+  16 files (+920 lines) and applies cleanly on a fresh checkout. `kur.sh` clones, patches and builds (HIP / Vulkan / CPU).
 * `bifrost_gguf.py`: llama.cpp's `convert_hf_to_gguf.py` output + our conversion tensors → Bifrost GGUF. Conversion tensors
   have no `.weight` suffix, so `llama-quantize` keeps them f32 while it quantizes everything else.
 * `bifrost_logits.cpp` + `karsilastir.py`: dump llama.cpp logits and compare them with `heimdall/hibrit.py`.
