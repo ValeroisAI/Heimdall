@@ -34,7 +34,6 @@ from torch.utils.checkpoint import checkpoint
 from .donustur import fetch_model
 from .donustur_hibrit import eta, gb, load_tokenizer, recall_sequence
 from .hibrit import ATTN, HLayer, HybridConfig, Weights, materialize, n_archival
-from .kernels import _unit_lower_inverse
 
 
 # --------------------------------------------------------------------------- çekirdekler (yalnız temel işlemler)
@@ -67,6 +66,19 @@ def blockwise_attention(qr, kr, vt, qblk: int = 2048, kblk: int = 8192):
     return out
 
 
+def unit_lower_inverse(a: torch.Tensor) -> torch.Tensor:
+    """(I + A)^-1 for strictly lower-triangular A [..., c, c], in ceil(log2 c) batched steps: A is nilpotent, so
+    (I + A)^-1 = (I - A)(I + A^2)(I + A^4)... exactly. Same result as forward substitution (to fp32 rounding), but a
+    handful of matmuls instead of a c-step Python loop, and it does not depend on solve_triangular, which some ROCm
+    builds lack (kernels._unit_lower_inverse then falls back to that loop)."""
+    n = -a
+    p = torch.eye(a.size(-1), dtype=a.dtype, device=a.device) + n
+    for _ in range(max(0, math.ceil(math.log2(a.size(-1))) - 1)):
+        n = n @ n
+        p = p + p @ n
+    return p
+
+
 def delta_rule_gqa(q, k, v, g, beta, chunk: int = 64, state=None):
     """Kapılı delta kuralı, durum KV başı başına, okuma R sorgu başıyla (delta_rule_reference ile aynı denklem).
     q [B,T,G,R,Dk], k [B,T,G,Dk] (L2-normalize), v [B,T,G,Dv], g / beta [B,T,G], state [B,G,Dk,Dv].
@@ -86,7 +98,7 @@ def delta_rule_gqa(q, k, v, g, beta, chunk: int = 64, state=None):
         g, beta = g.reshape(b, G, n, c).cumsum(-1), beta.reshape(b, G, n, c)
         decay = (g[..., :, None] - g[..., None, :]).tril().exp().tril()           # [b,G,n,c,c]
         k_beta = k * beta[..., None]
-        w_inv = _unit_lower_inverse((k_beta @ k.transpose(-1, -2) * decay).tril(-1))
+        w_inv = unit_lower_inverse((k_beta @ k.transpose(-1, -2) * decay).tril(-1))
         u, w = w_inv @ (v * beta[..., None]), w_inv @ (k_beta * g.exp()[..., None])
         attn = (q @ k[:, :, None].transpose(-1, -2)) * decay[:, :, None]           # [b,G,R,n,c,c]
         q_decay = q * g.exp()[:, :, None, :, :, None]
@@ -146,7 +158,7 @@ def precompute(layer, h, P, wq):
     return {kk: vv.cpu() for kk, vv in d.items()}, yt
 
 
-def seq_loss(a, d, seg: int, W_o):
+def seq_loss(a, d, seg: int, W_o, chunk: int = 64):
     """Bir dizinin göreli hatası (eski rel_mse ile aynı, P konumlarında, wq ağırlıklı). Zaman `seg`'lik parçalarda;
     parça sınırında yalnız hafıza durumu tutulur, parça geri yayılımda yeniden hesaplanır (gradyan tam)."""
     c = a.c
@@ -168,7 +180,7 @@ def seq_loss(a, d, seg: int, W_o):
         L = wk.size(0)
         qm = F.normalize(torch.einsum("phd,hde->phe", d_["qP"][sel].float(), a.fq), dim=-1) * D ** -0.5
         qf = torch.zeros(L, G, R, D, device=dev).index_copy(0, Pl, qm.reshape(-1, G, R, D))
-        o, state = delta_rule_gqa(qf[None], wk[None], wv[None], wg[None], wb[None], 64, state)
+        o, state = delta_rule_gqa(qf[None], wk[None], wv[None], wg[None], wb[None], chunk, state)
         om = o[0, Pl].reshape(-1, c.h, D)
         gam = torch.sigmoid(a.mix(d_["xP"][sel].float()) + a.mix_lse * (d_["lseP"][sel] - math.log(W)))
         delta = gam[..., None] * (a.mem_scale[:, None] * om - d_["owP"][sel].float())
@@ -360,6 +372,7 @@ def cmd_egit(a) -> None:
             H.put(j, h)
             del h
         H.flush()
+        t_fwd = time.time() - t0
         if convert:
             rep = train_layer(layer.self_attn, cache_dir, n, a, dev, pool, log, name)
             report[name] = rep
@@ -380,8 +393,11 @@ def cmd_egit(a) -> None:
         el = time.time() - t_all
         left = (el / max(done_attn, 1)) * (n_conv - done_attn) if done_attn else 0
         peak = f" | tepe GPU {gb(torch.cuda.max_memory_allocated())}" if gpu else ""
+        sw = swap_gb()
+        parts = f" (ileri {t_fwd:.0f} + eğitim {time.time() - t0 - t_fwd:.0f})" if convert else ""
         log(f"katman {i:2d}/{c.n_layers} ({'dönüşüm' if convert else 'dikkat' if kind == ATTN else 'DeltaNet'}) "
-            f"{time.time() - t0:5.0f} sn | {eta(left) if done_attn else 'tahmin ilk dönüşümden sonra'}{peak}")
+            f"{time.time() - t0:5.0f} sn{parts} | {eta(left) if done_attn else 'tahmin ilk dönüşümden sonra'}{peak}"
+            f"{f' | takas {sw:.1f} GB' if sw > 0.5 else ''}")
     log(f"bitti: {out / 'donusum_param.pt'} ({len(conv)} katman, toplam {(time.time() - t_all) / 3600:.2f} sa)")
     h_file.unlink(missing_ok=True)
     st_file.unlink(missing_ok=True)
@@ -406,7 +422,7 @@ def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
         with torch.no_grad():
             for j in range(n - n_val, n):
                 d = load(j)
-                tot += float(seq_loss(at, d, a.parca, W_o))
+                tot += float(seq_loss(at, d, a.parca, W_o, a.delta_parca))
                 base += window_only_loss(d)
         return tot / n_val, base / n_val
 
@@ -420,7 +436,7 @@ def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
         d = nxt.result()
         if step < a.adim:
             nxt = pool.submit(load, int(order[step]))                                # bir sonraki dizi arka planda
-        loss = seq_loss(at, d, a.parca, W_o)
+        loss = seq_loss(at, d, a.parca, W_o, a.delta_parca)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
@@ -440,6 +456,15 @@ def settings(a) -> dict:
     """Run settings as plain values (the argparse namespace also holds the command function, which must not be pickled:
     run as `python -m`, it pickles as __main__.cmd_egit and no other program could load the file)."""
     return {k: v for k, v in vars(a).items() if k != "fn"}
+
+
+def swap_gb() -> float:
+    """Swap in use (GB, Linux): the run slows down a lot once the hidden states no longer fit in RAM."""
+    try:
+        m = dict(l.split(":", 1) for l in Path("/proc/meminfo").read_text().splitlines())
+        return (int(m["SwapTotal"].split()[0]) - int(m["SwapFree"].split()[0])) / 2**20
+    except (OSError, KeyError, ValueError):
+        return 0.0
 
 
 def cmd_onar(a) -> None:
@@ -474,6 +499,8 @@ def main() -> None:
         s.add_argument("--window", type=int, default=2048)
         s.add_argument("--kayip-orani", type=float, default=0.125, help="kaybın hesaplandığı rastgele konum oranı")
         s.add_argument("--parca", type=int, default=8192, help="zaman parçası (bellek ↔ hız)")
+        s.add_argument("--delta-parca", type=int, default=128,
+                       help="delta kuralı blok boyu: büyük blok = daha az sıralı adım (sonuç aynı, yalnız yuvarlama)")
         if nm == "egit":
             s.add_argument("--train", required=True)
             s.add_argument("--out", required=True)
