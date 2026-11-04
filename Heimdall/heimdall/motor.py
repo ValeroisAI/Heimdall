@@ -318,40 +318,64 @@ def cmd_egit(a) -> None:
     T, n = p["seq"], p["kalib"]
     log(plan_report(c, p, a.window, a.kayip_orani, a.parca))
 
-    st_file, h_file = out / "motor_durum.json", out / "gizli.bin"
+    # Hidden states are double-buffered: layer i reads buffer `cur` and writes the other one, so stopping at any point
+    # never leaves a buffer that holds a mix of layer i inputs and outputs. The state file records the layer, the
+    # buffer and how many sequences of the layer's forward pass are already written ("fwd"); a resume continues there.
+    st_file = out / "motor_durum.json"
+    h_files = (out / "gizli.bin", out / "gizli_b.bin")
     prog = json.loads(st_file.read_text()) if (a.devam and st_file.exists()) else {"next": 0}
-    tok = load_tokenizer(a.model) if a.sentetik > 0 else None
-    ids, pos = calib_set(a.train, c.vocab, n, T, a.seed, tok, a.sentetik, a.window, a.kayip_orani, a.soru_agirlik)
-    H = HiddenStore(h_file, n, T, c.d, dtype, create=prog["next"] == 0)
-    if prog["next"] == 0:
-        emb = w.get("embed_tokens.weight").to(dtype)
-        for j in range(n):
-            H.put(j, emb[ids[j]])
-        del emb
     conv, params, report = [], {}, {}
     if prog["next"] > 0 and (out / "donusum_param.pt").exists():
         stp = torch.load(out / "donusum_param.pt", map_location="cpu", weights_only=False)
         conv, params, report = stp["conv"], stp["params"], stp.get("meta", {}).get("rapor", {})
-        log(f"devam: katman {prog['next']}'den sürülüyor ({len(conv)} katman hazır)")
+    if prog["next"] > 0 and prog.get("v") != 2:
+        # state from before double buffering: the hidden states may hold a half-applied layer. Rebuild them from the
+        # embeddings with forward passes only (the teacher's outputs, as in training); trained layers are kept.
+        log(f"devam (eski durum dosyası): gizli durumlar baştan yeniden kuruluyor, eğitilmiş {len(conv)} katman korunuyor")
+        prog = {"next": 0, "v": 2, "cur": 0, "fwd": 0}
+    prog.setdefault("v", 2), prog.setdefault("cur", 0), prog.setdefault("fwd", 0)
+    trained = {cv["name"] for cv in conv}
+    if prog["next"] > 0 or trained:
+        log(f"devam: katman {prog['next']}, dizi {prog['fwd']}/{n}'den sürülüyor ({len(trained)} katman eğitilmiş)")
+    tok = load_tokenizer(a.model) if a.sentetik > 0 else None
+    ids, pos = calib_set(a.train, c.vocab, n, T, a.seed, tok, a.sentetik, a.window, a.kayip_orani, a.soru_agirlik)
+    fresh = prog["next"] == 0 and prog["fwd"] == 0
+    Hs = [HiddenStore(f, n, T, c.d, dtype, create=fresh or not f.exists()) for f in h_files]
+    if fresh:
+        emb = w.get("embed_tokens.weight").to(dtype)
+        for j in range(n):
+            Hs[0].put(j, emb[ids[j]])
+        Hs[0].flush()
+        del emb
+
+    def save_state(**kw):
+        prog.update(kw)
+        tmp = st_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(prog))
+        tmp.replace(st_file)                                   # atomic: never a half-written state file
+
     cache_dir = out / "katman_onbellek"
     pool = ThreadPoolExecutor(1)
     t_all, done_attn = time.time(), 0
-    n_conv = sum(1 for i, k in enumerate(c.layer_types) if k == ATTN and f"layers.{i}" not in keep)
+    n_conv = sum(1 for i, k in enumerate(c.layer_types)
+                 if k == ATTN and f"layers.{i}" not in keep and f"layers.{i}" not in trained)
 
     for i, kind in enumerate(c.layer_types):
         if i < prog["next"]:
             continue
         t0 = time.time()
         name = f"layers.{i}"
+        Hin, Hout = Hs[prog["cur"]], Hs[1 - prog["cur"]]
         with torch.device("meta"):
             layer = HLayer(c, kind)
         materialize(layer, f"{name}.", w, dev, dtype)
-        convert = kind == ATTN and name not in keep
+        convert = kind == ATTN and name not in keep and name not in trained      # needs training in this run
         if convert:
+            torch.manual_seed(a.seed + zlib.crc32(name.encode()))          # same initial values on every (re)run
             layer.self_attn.convert(a.window, a.sinks, n_archival(a.archival_frac, c.hkv, "long"), "long")
             cache_dir.mkdir(exist_ok=True)
-        for j in range(n):                                     # ileri geçiş (öğretmen) + değişmeyen verinin kaydı
-            h = H.get(j).to(dev)
+        for j in range(prog["fwd"], n):                         # forward pass (teacher) + the fixed data of the layer
+            h = Hin.get(j).to(dev)
             with torch.no_grad():
                 if kind == ATTN:
                     if convert:
@@ -369,24 +393,30 @@ def cmd_egit(a) -> None:
                     for r0 in range(0, T, a.parca):
                         outs.append(layer(h[None, r0:r0 + a.parca], cache, r0)[0])
                     h = torch.cat(outs)
-            H.put(j, h)
+            Hout.put(j, h)
             del h
-        H.flush()
+            Hout.flush()
+            save_state(next=i, fwd=j + 1)
         t_fwd = time.time() - t0
         if convert:
+            missing = [j for j in range(n) if not (cache_dir / f"{j}.pt").exists()]
+            if missing:
+                raise RuntimeError(f"{name}: katman önbelleği eksik ({len(missing)} dizi); motor_durum.json içinde "
+                                   f'"fwd": 0 yapıp DEVAM=1 ile yeniden başlatın')
             rep = train_layer(layer.self_attn, cache_dir, n, a, dev, pool, log, name)
             report[name] = rep
             at = layer.self_attn
             conv.append(dict(name=name, window=at.window, sinks=at.sinks, archival=int((at.decay_mask == 0).sum())))
             params.update({f"{name}.self_attn.{k}": v.detach().float().cpu() for k, v in at.named_parameters()
                            if k.split(".")[0] in at.NEW})
-            for f in cache_dir.glob("*.pt"):
-                f.unlink()
             done_attn += 1
         torch.save({"conv": conv, "params": params, "mtp_hidden": "normed",
                     "meta": {"model": a.model, "rapor": report, "son_katman": i, "motor": settings(a)}},
                    out / "donusum_param.pt")
-        st_file.write_text(json.dumps({"next": i + 1}))
+        save_state(next=i + 1, cur=1 - prog["cur"], fwd=0)     # only now does the output buffer become the input
+        if convert:
+            for f in cache_dir.glob("*.pt"):
+                f.unlink()
         del layer
         if gpu:
             torch.cuda.empty_cache()
@@ -395,11 +425,13 @@ def cmd_egit(a) -> None:
         peak = f" | tepe GPU {gb(torch.cuda.max_memory_allocated())}" if gpu else ""
         sw = swap_gb()
         parts = f" (ileri {t_fwd:.0f} + eğitim {time.time() - t0 - t_fwd:.0f})" if convert else ""
-        log(f"katman {i:2d}/{c.n_layers} ({'dönüşüm' if convert else 'dikkat' if kind == ATTN else 'DeltaNet'}) "
+        kind_s = "dönüşüm" if convert else "eğitilmiş, ileri" if name in trained else "dikkat" if kind == ATTN else "DeltaNet"
+        log(f"katman {i:2d}/{c.n_layers} ({kind_s}) "
             f"{time.time() - t0:5.0f} sn{parts} | {eta(left) if done_attn else 'tahmin ilk dönüşümden sonra'}{peak}"
             f"{f' | takas {sw:.1f} GB' if sw > 0.5 else ''}")
     log(f"bitti: {out / 'donusum_param.pt'} ({len(conv)} katman, toplam {(time.time() - t_all) / 3600:.2f} sa)")
-    h_file.unlink(missing_ok=True)
+    for f in h_files:
+        f.unlink(missing_ok=True)
     st_file.unlink(missing_ok=True)
 
 

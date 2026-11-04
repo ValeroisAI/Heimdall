@@ -226,8 +226,21 @@ case $ADIM in
             2>&1 | grep "Final estimate" || true ;;
   motor)  $PY -m heimdall.motor egit --model $MODEL --train $VERI/wiki_train.bin --out $OUT3 --window $PENCERE \
             ${MOTOR_ARGS:-} ${DEVAM:+--devam} && $PY -m heimdall.motor onar $OUT3/donusum_param.pt ;;
-  motortest)
-          OUT2=$OUT3 ADIM=a2test bash "$SELF" && OUT2=$OUT3 ADIM=a2parola bash "$SELF" ;;
+  motortest)   # GGUF + parola (hafıza açık) + PPL + hız; sonra hafıza kapalı ve erişimli dikkat (aynı dosya)
+          OUT2=$OUT3 ADIM=a2test bash "$SELF"
+          G=$OUT3/q38-27b-h2-$QUANT.gguf; L=${PAROLA_L:-8192,32768,65536}; R=${RET:-16,2048,64,4}
+          echo "-- hafıza kapalı (BIFROST_MEM_OFF=1)"; BIFROST_MEM_OFF=1 pk $G $L
+          # erişimli dikkat yeni yamada: llama.cpp eski yamayla derlenmişse BIFROST_RET sessizce yok sayılır, önce yeniden derle
+          if ! grep -q BIFROST_RET $LLAMA/src/llama-hparams.cpp 2>/dev/null; then
+            echo "-- llama.cpp erişimli dikkat yamasıyla yeniden derleniyor (GPU=${GPU:-vulkan})"
+            GPU=${GPU:-vulkan} DIR=$LLAMA bash llamacpp/kur.sh >/dev/null 2>&1 || echo "kur.sh başarısız: erişimli dikkat testi atlandı"
+          fi
+          if grep -q BIFROST_RET $LLAMA/src/llama-hparams.cpp 2>/dev/null; then
+            echo "-- erişimli dikkat (BIFROST_RET=$R)"; BIFROST_RET=$R pk $G 32768,65536
+            BIFROST_RET=$R $LLAMA/build/bin/llama-bench -m $G -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 64 \
+              -d 32768,131072 2>&1 | grep -E "^\| qwen" || true
+          fi
+          echo "motortest bitti" ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
   gece)   mkdir -p $OUT
           { ADIM=a bash "$SELF" && ADIM=test bash "$SELF" && cp $OUT/degerlendirme.json $OUT/degerlendirme_A.json \

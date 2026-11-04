@@ -88,3 +88,69 @@ def test_motor_end_to_end(tiny_dir, tmp_path):
     assert (torch.cat(outs, 1) - full).abs().max() < 1e-4
     rep = st["meta"]["rapor"]["layers.3"]
     assert rep["egitilmis"] <= rep["egitimsiz"] + 1e-6
+
+
+def _egit(tiny_dir, tmp_path, out, devam=False):
+    from heimdall import motor
+    data = tmp_path / "train.bin"
+    if not data.exists():
+        np.random.default_rng(0).integers(1, 300, 20000).astype(np.uint16).tofile(data)
+    sys.argv = ["motor", "egit", "--model", str(tiny_dir), "--train", str(data), "--out", str(out), "--seq", "96",
+                "--kalib", "4", "--window", "16", "--sinks", "2", "--parca", "32", "--adim", "6", "--sentetik", "0",
+                "--kayip-orani", "0.5", "--keep-every", "0", "--device", "cpu"] + (["--devam"] if devam else [])
+    motor.main()
+    return torch.load(out / "donusum_param.pt", weights_only=False)["params"]
+
+
+def _same(p, q):
+    assert p.keys() == q.keys()
+    for k in p:
+        assert torch.allclose(p[k], q[k], atol=1e-6), k
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("where", ["training", "forward"])
+def test_motor_resume_equals_uninterrupted(tiny_dir, tmp_path, monkeypatch, where):
+    """Stopping during a layer's training or in the middle of its forward pass, then DEVAM, gives the same result."""
+    from heimdall import motor
+    ref = _egit(tiny_dir, tmp_path, tmp_path / "ref")
+    calls = {"n": 0}
+    if where == "training":
+        orig = motor.train_layer
+
+        def boom(at, *a_, **k_):
+            if a_[-1] == "layers.7":                           # second converted layer: hidden states already written
+                raise _Stop
+            return orig(at, *a_, **k_)
+        monkeypatch.setattr(motor, "train_layer", boom)
+    else:
+        orig = motor.precompute
+
+        def boom(*a_, **k_):
+            calls["n"] += 1
+            if calls["n"] == 4 + 2:                           # layer 7, third sequence
+                raise _Stop
+            return orig(*a_, **k_)
+        monkeypatch.setattr(motor, "precompute", boom)
+    with pytest.raises(_Stop):
+        _egit(tiny_dir, tmp_path, tmp_path / "run")
+    monkeypatch.undo()
+    _same(_egit(tiny_dir, tmp_path, tmp_path / "run", devam=True), ref)
+
+
+def test_motor_resume_from_old_state_file(tiny_dir, tmp_path):
+    """An old (single-buffer) state file triggers a rebuild of the hidden states; trained layers are kept."""
+    import json
+    ref = _egit(tiny_dir, tmp_path, tmp_path / "ref")
+    run = tmp_path / "run"
+    _egit(tiny_dir, tmp_path, run)
+    st = torch.load(run / "donusum_param.pt", weights_only=False)
+    st["conv"] = [cv for cv in st["conv"] if cv["name"] == "layers.3"]
+    st["params"] = {k: v for k, v in st["params"].items() if k.startswith("layers.3.")}
+    torch.save(st, run / "donusum_param.pt")
+    (run / "motor_durum.json").write_text(json.dumps({"next": 6}))      # old format: no "v"
+    np.random.default_rng(1).integers(0, 60000, 4 * 96 * 64).astype(np.uint16).tofile(run / "gizli.bin")  # garbage
+    _same(_egit(tiny_dir, tmp_path, run, devam=True), ref)
