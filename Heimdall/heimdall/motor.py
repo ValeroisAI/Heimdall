@@ -79,10 +79,72 @@ def unit_lower_inverse(a: torch.Tensor) -> torch.Tensor:
     return p
 
 
+_FLA = None        # fused Triton kernel (flash-linear-attention), set by prepare_fast() after it passes its self-test
+_FLA_DTYPE = torch.float32
+
+
+def _gqa_fla(q, k, v, g, beta, state):
+    """delta_rule_gqa through flash-linear-attention's fused chunk kernel (forward and backward in one kernel each).
+    fla keeps one state per query head, ours is shared by the R query heads of a KV head: k, v, g, beta and the state
+    are repeated R times (identical copies, so their gradients add up correctly) and one copy of the final state is kept."""
+    b, t, G, R, d = q.shape
+    rep = lambda z: z.repeat_interleave(R, 2)
+    s0 = None if state is None else state.float().repeat_interleave(R, 1)
+    dt = _FLA_DTYPE
+    o, s = _FLA(q.reshape(b, t, G * R, d).to(dt), rep(k).to(dt), rep(v).to(dt), rep(g).float(), rep(beta).to(dt),
+                scale=1.0, initial_state=s0, output_final_state=True)
+    return o.float().reshape(b, t, G, R, -1), s.float()[:, ::R]
+
+
+def prepare_fast(dev, log, which: str = "auto") -> str:
+    """Use the fused kernel only if it reproduces delta_rule_gqa (outputs and every gradient) on this GPU."""
+    global _FLA, _FLA_DTYPE
+    _FLA = None
+    if which == "torch" or dev.type != "cuda":
+        return "PyTorch"
+    try:
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as cand
+    except Exception:
+        log("hızlı çekirdek yok (pip install flash-linear-attention): PyTorch yolu kullanılıyor")
+        return "PyTorch"
+    gen = torch.Generator().manual_seed(0)
+    b, t, G, R, d = 1, 700, 2, 3, 256
+    mk = lambda *sh: torch.randn(*sh, generator=gen)
+    ins = [F.normalize(mk(b, t, G, R, d), dim=-1) * d ** -0.5, F.normalize(mk(b, t, G, d), dim=-1), mk(b, t, G, d),
+           -torch.rand(b, t, G, generator=gen) * 0.05, torch.rand(b, t, G, generator=gen), mk(b, G, d, d) * 0.05]
+    ins = [z.to(dev).requires_grad_() for z in ins]
+
+    def run(fast):
+        global _FLA
+        _FLA = cand if fast else None
+        o, s = delta_rule_gqa(*ins[:5], state=ins[5])
+        loss = (o * torch.linspace(-1, 1, o.numel(), device=dev).view_as(o)).sum() + s.square().sum()
+        grads = torch.autograd.grad(loss, ins)
+        return [o.detach(), s.detach()] + [g_.detach() for g_ in grads]
+
+    ref = run(False)
+    for dt, tol in ((torch.float32, 2e-3), (torch.bfloat16, 3e-2)):
+        try:
+            _FLA_DTYPE = dt
+            got = run(True)
+            err = max(float((x - y).norm() / y.norm().clamp_min(1e-12)) for x, y in zip(got, ref))
+        except Exception as e:  # unsupported dtype / backend
+            log(f"hızlı çekirdek {str(dt)[6:]} çalışmadı ({type(e).__name__}: {str(e)[:120]})")
+            continue
+        if err < tol:
+            _FLA = cand
+            return f"flash-linear-attention ({str(dt)[6:]}, referansa göre en büyük göreli hata {err:.1e})"
+        log(f"hızlı çekirdek {str(dt)[6:]} referansla uyuşmuyor (göreli hata {err:.1e})")
+    _FLA = None
+    return "PyTorch"
+
+
 def delta_rule_gqa(q, k, v, g, beta, chunk: int = 64, state=None):
     """Kapılı delta kuralı, durum KV başı başına, okuma R sorgu başıyla (delta_rule_reference ile aynı denklem).
     q [B,T,G,R,Dk], k [B,T,G,Dk] (L2-normalize), v [B,T,G,Dv], g / beta [B,T,G], state [B,G,Dk,Dv].
     Döndürür o [B,T,G,R,Dv] ve son durum [B,G,Dk,Dv], ikisi de fp32."""
+    if _FLA is not None and q.is_cuda:
+        return _gqa_fla(q, k, v, g, beta, state)
     with torch.autocast(q.device.type, enabled=False):
         q = q.float().permute(0, 2, 3, 1, 4)                                        # [b,G,R,t,dk]
         k, v = k.float().transpose(1, 2), v.float().transpose(1, 2)                 # [b,G,t,d]
@@ -317,6 +379,7 @@ def cmd_egit(a) -> None:
     p["keep"] = sorted(keep, key=lambda s_: int(s_.split(".")[1]))
     T, n = p["seq"], p["kalib"]
     log(plan_report(c, p, a.window, a.kayip_orani, a.parca))
+    log(f"delta çekirdeği: {prepare_fast(dev, log, a.cekirdek)}")
 
     # Hidden states are double-buffered: layer i reads buffer `cur` and writes the other one, so stopping at any point
     # never leaves a buffer that holds a mix of layer i inputs and outputs. The state file records the layer, the
@@ -545,6 +608,8 @@ def main() -> None:
             s.add_argument("--soru-agirlik", type=float, default=4.0, help="soru + cevap konumlarının kayıp ağırlığı")
             s.add_argument("--seed", type=int, default=0)
             s.add_argument("--device", default=None)
+            s.add_argument("--cekirdek", choices=["auto", "torch"], default="auto",
+                           help="delta kuralı: auto = flash-linear-attention kuruluysa ve sınamayı geçerse onu kullan")
             s.add_argument("--devam", action="store_true", help="yarıda kalan koşuyu kaldığı katmandan sür")
         s.set_defaults(fn=cmd_plan if nm == "plan" else cmd_egit)
     s = sub.add_parser("onar", help="eski donusum_param.pt dosyasını başka programların açabileceği hale getir")

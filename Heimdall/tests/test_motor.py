@@ -154,3 +154,26 @@ def test_motor_resume_from_old_state_file(tiny_dir, tmp_path):
     (run / "motor_durum.json").write_text(json.dumps({"next": 6}))      # old format: no "v"
     np.random.default_rng(1).integers(0, 60000, 4 * 96 * 64).astype(np.uint16).tofile(run / "gizli.bin")  # garbage
     _same(_egit(tiny_dir, tmp_path, run, devam=True), ref)
+
+
+def test_fla_gqa_mapping_equals_torch(monkeypatch):
+    """The GQA mapping onto a per-head fused kernel (repeat k/v/g/beta/state, keep one final state) is exact.
+    A stand-in with fla's signature runs the per-head PyTorch reference, so this checks the mapping on CPU."""
+    from heimdall import motor
+
+    def fake(q, k, v, g, beta, scale, initial_state, output_final_state):
+        return delta_rule_reference(q * scale, k, v, g, beta, 64, initial_state)
+    torch.manual_seed(0)
+    b, t, G, R, d = 1, 150, 2, 3, 32
+    ins = [F.normalize(torch.randn(b, t, G, R, d), dim=-1) * d ** -0.5, F.normalize(torch.randn(b, t, G, d), dim=-1),
+           torch.randn(b, t, G, d), -torch.rand(b, t, G) * 0.1, torch.rand(b, t, G), torch.randn(b, G, d, d) * 0.1]
+
+    def run():
+        x = [z.clone().requires_grad_() for z in ins]
+        o, s = (motor._gqa_fla(*x[:5], x[5]) if motor._FLA is not None else delta_rule_gqa(*x[:5], state=x[5]))
+        ((o * torch.linspace(-1, 1, o.numel()).view_as(o)).sum() + s.square().sum()).backward()
+        return [o, s] + [z.grad for z in x]
+    ref = run()
+    monkeypatch.setattr(motor, "_FLA", fake)
+    for x, y in zip(run(), ref):
+        assert torch.allclose(x, y, atol=1e-5, rtol=1e-4)
