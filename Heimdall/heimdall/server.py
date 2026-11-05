@@ -25,6 +25,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
+# The allocator reads this at the first GPU allocation, so it must be set before torch is imported (as in train.py):
+# growing KV caches of different sizes otherwise fragment memory on long prompts.
+os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from fastapi import Depends, FastAPI, HTTPException, Request as HTTPRequest
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse

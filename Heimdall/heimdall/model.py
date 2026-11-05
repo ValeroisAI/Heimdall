@@ -155,7 +155,9 @@ class Attention(nn.Module):
             need = max(lens) + t
             cap = cache["kpos"].size(1)
             if need > cap:
-                grow = -(-need // 256) * 256 - cap
+                # grow by at least 25 % (not just to the next 256): the long prompt chunks and the decode steps then
+                # copy the cache O(log n) times instead of once per chunk, and freed blocks fragment the allocator less
+                grow = -(-max(need, cap + cap // 4) // 256) * 256 - cap
                 cache["k"] = F.pad(cache["k"], (0, 0, 0, grow))
                 cache["v"] = F.pad(cache["v"], (0, 0, 0, grow))
                 cache["kpos"] = F.pad(cache["kpos"], (0, grow), value=-1)
