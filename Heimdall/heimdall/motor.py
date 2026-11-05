@@ -108,6 +108,8 @@ def prepare_fast(dev, log, which: str = "auto") -> str:
     except Exception:
         log("hızlı çekirdek yok (pip install flash-linear-attention): PyTorch yolu kullanılıyor")
         return "PyTorch"
+    log("hızlı çekirdek sınanıyor (ilk seferde Triton çekirdekleri bu GPU için derlenir: birkaç dakika sürebilir)")
+    t0 = time.time()
     gen = torch.Generator().manual_seed(0)
     b, t, G, R, d = 1, 700, 2, 3, 256
     mk = lambda *sh: torch.randn(*sh, generator=gen)
@@ -134,6 +136,7 @@ def prepare_fast(dev, log, which: str = "auto") -> str:
             continue
         if err < tol:
             _FLA = cand
+            log(f"hızlı çekirdek sınaması {time.time() - t0:.0f} sn sürdü")
             return f"flash-linear-attention ({str(dt)[6:]}, referansa göre en büyük göreli hata {err:.1e})"
         log(f"hızlı çekirdek {str(dt)[6:]} referansla uyuşmuyor (göreli hata {err:.1e})")
     _FLA = None
