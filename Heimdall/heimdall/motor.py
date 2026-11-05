@@ -489,9 +489,13 @@ def cmd_egit(a) -> None:
         sw = swap_gb()
         parts = f" (ileri {t_fwd:.0f} + eğitim {time.time() - t0 - t_fwd:.0f})" if convert else ""
         kind_s = "dönüşüm" if convert else "eğitilmiş, ileri" if name in trained else "dikkat" if kind == ATTN else "DeltaNet"
+        trained_now = done_attn
         log(f"katman {i:2d}/{c.n_layers} ({kind_s}) "
             f"{time.time() - t0:5.0f} sn{parts} | {eta(left) if done_attn else 'tahmin ilk dönüşümden sonra'}{peak}"
             f"{f' | takas {sw:.1f} GB' if sw > 0.5 else ''}")
+        if a.en_fazla_katman and trained_now >= a.en_fazla_katman:
+            log(f"durduruldu: --en-fazla-katman {a.en_fazla_katman} (hız ölçümü). Tam koşu için başka bir --out kullanın.")
+            return
     log(f"bitti: {out / 'donusum_param.pt'} ({len(conv)} katman, toplam {(time.time() - t_all) / 3600:.2f} sa)")
     for f in h_files:
         f.unlink(missing_ok=True)
@@ -608,6 +612,8 @@ def main() -> None:
             s.add_argument("--soru-agirlik", type=float, default=4.0, help="soru + cevap konumlarının kayıp ağırlığı")
             s.add_argument("--seed", type=int, default=0)
             s.add_argument("--device", default=None)
+            s.add_argument("--en-fazla-katman", type=int, default=0,
+                           help="N dönüşüm katmanı eğitilince dur (hız ölçümü; 0 = hepsi)")
             s.add_argument("--cekirdek", choices=["auto", "torch"], default="auto",
                            help="delta kuralı: auto = flash-linear-attention kuruluysa ve sınamayı geçerse onu kullan")
             s.add_argument("--devam", action="store_true", help="yarıda kalan koşuyu kaldığı katmandan sür")

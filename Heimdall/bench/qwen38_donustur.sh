@@ -31,6 +31,9 @@
 #   Eğitim motoru (heimdall/motor.py: uzun dizi, öğretmen bir kez, parça parça tam gradyan):
 #   ADIM=motorprova   bash bench/qwen38_donustur.sh   # 0.8B, 16K dizi, hepsi dönüşür: parola (hafıza açık/kapalı) + PPL
 #   ADIM=motor        bash bench/qwen38_donustur.sh   # 27B → $OUT3 (runs/q38_m1), 64K dizi, 12/4; MOTOR_ARGS ile ayar
+#   Hızlı deneme (gecelik koşudan önce, ayrı klasörde): ilk dönüşüm katmanı, 30 adım, sn/adım + çekirdek seçimi:
+#     OUT3=runs/q38_hiz MOTOR_ARGS="--adim 30 --en-fazla-katman 1" ADIM=motor bash bench/qwen38_donustur.sh
+#     ADIMM=30 SEQM=8192 ADIM=motorprova bash bench/qwen38_donustur.sh   # 0.8B: tüm hat, birkaç dakika
 #   ADIM=motortest    bash bench/qwen38_donustur.sh   # motor sonrası: GGUF + parola (açık/kapalı) + PPL + hız
 #   ADIM=erisim       bash bench/qwen38_donustur.sh   # erişimli dikkat (BIFROST_RET) kapalı ↔ açık: parola + hız (ERISIM_M=model)
 #   ADIM=sunucu       bash bench/qwen38_donustur.sh   # Valerois Runtime: http://127.0.0.1:1234/v1 (Nova → Ayarlar → Modeller → Local)
@@ -214,7 +217,7 @@ case $ADIM in
           [ -f $V/wiki_train.bin ] || $H hazirla --model $M --veri $V --tokens 5e6
           [ -f $O/donusum_param.pt ] && [ ! -f $O/motor_durum.json ] || $PY -m heimdall.motor egit --model $M \
             --train $V/wiki_train.bin --out $O --window 256 --seq ${SEQM:-16384} --kalib 16 --keep-every 0 \
-            --adim 300 ${DEVAM:+--devam}
+            --adim ${ADIMM:-300} ${DEVAM:+--devam}
           $PY -m heimdall.motor onar $O/donusum_param.pt      # düzeltmeden önce kaydedilmiş dosya için (zararsız)
           $PY bench/bifrost_param_ozet.py $O/donusum_param.pt
           [ -f $O/bifrost-f16.gguf ] || $PY llamacpp/bifrost_gguf.py --model $HFM --conv $O/donusum_param.pt \

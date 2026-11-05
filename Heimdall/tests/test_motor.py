@@ -177,3 +177,14 @@ def test_fla_gqa_mapping_equals_torch(monkeypatch):
     monkeypatch.setattr(motor, "_FLA", fake)
     for x, y in zip(run(), ref):
         assert torch.allclose(x, y, atol=1e-5, rtol=1e-4)
+
+
+def test_motor_stops_after_n_layers(tiny_dir, tmp_path):
+    from heimdall import motor
+    np.random.default_rng(0).integers(1, 300, 20000).astype(np.uint16).tofile(tmp_path / "train.bin")
+    sys.argv = ["motor", "egit", "--model", str(tiny_dir), "--train", str(tmp_path / "train.bin"), "--out",
+                str(tmp_path / "run"), "--seq", "96", "--kalib", "4", "--window", "16", "--sinks", "2", "--parca", "32",
+                "--adim", "3", "--sentetik", "0", "--keep-every", "0", "--device", "cpu", "--en-fazla-katman", "1"]
+    motor.main()
+    st = torch.load(tmp_path / "run" / "donusum_param.pt", weights_only=False)
+    assert [cv["name"] for cv in st["conv"]] == ["layers.3"]        # the second attention layer (7) was not reached
