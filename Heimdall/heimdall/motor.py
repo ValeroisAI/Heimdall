@@ -33,6 +33,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .donustur import fetch_model
 from .donustur_hibrit import eta, gb, load_tokenizer, recall_sequence
+from . import kernels
 from .hibrit import ATTN, HLayer, HybridConfig, Weights, materialize, n_archival
 
 
@@ -379,7 +380,9 @@ def cmd_egit(a) -> None:
     p["keep"] = sorted(keep, key=lambda s_: int(s_.split(".")[1]))
     T, n = p["seq"], p["kalib"]
     log(plan_report(c, p, a.window, a.kayip_orani, a.parca))
-    log(f"delta çekirdeği: {prepare_fast(dev, log, a.cekirdek)}")
+    log(f"delta çekirdeği (hafıza eğitimi): {prepare_fast(dev, log, a.cekirdek)}")
+    if a.cekirdek == "auto":   # the model's own DeltaNet layers (3 of 4) use the same library through kernels.delta_rule
+        log(f"delta çekirdeği (DeltaNet katmanları): {kernels.prepare(dev)}")
 
     # Hidden states are double-buffered: layer i reads buffer `cur` and writes the other one, so stopping at any point
     # never leaves a buffer that holds a mix of layer i inputs and outputs. The state file records the layer, the
