@@ -545,23 +545,28 @@ def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
             g_["lr"] = a.lr * 0.5 * (1 + math.cos(math.pi * step / a.adim))
         prof = a.profil and step <= 8
         if prof:
-            sync(dev), tt := [time.time()]
+            sync(dev)
+            tt = [time.time()]
         d = nxt.result()
         if prof:
-            sync(dev), tt.append(time.time())
+            sync(dev)
+            tt.append(time.time())
         if step < a.adim:
             nxt = pool.submit(load, int(order[step]))                                # bir sonraki dizi arka planda
         loss = seq_loss(at, d, a.parca, W_o, a.delta_parca)
         if prof:
-            sync(dev), tt.append(time.time())
+            sync(dev)
+            tt.append(time.time())
         loss.backward()
         if prof:
-            sync(dev), tt.append(time.time())
+            sync(dev)
+            tt.append(time.time())
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
         if prof:
-            sync(dev), tt.append(time.time())
+            sync(dev)
+            tt.append(time.time())
             log(f"    [profil] adım {step}: veri bekleme {tt[1] - tt[0]:.2f} | ileri {tt[2] - tt[1]:.2f} | "
                 f"geri {tt[3] - tt[2]:.2f} | optimizer {tt[4] - tt[3]:.2f} | toplam {tt[4] - tt[0]:.2f} sn")
         if step % 50 == 0 or step == a.adim:
