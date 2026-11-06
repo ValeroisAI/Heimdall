@@ -508,6 +508,11 @@ def cmd_egit(a) -> None:
     st_file.unlink(missing_ok=True)
 
 
+def sync(dev):
+    if dev.type == "cuda":
+        torch.cuda.synchronize(dev)
+
+
 def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
     W_o = at.o_proj.weight.float()
     params = at.new_params("all")
@@ -538,14 +543,27 @@ def train_layer(at, cache_dir: Path, n: int, a, dev, pool, log, name):
     for step in range(1, a.adim + 1):
         for g_ in opt.param_groups:
             g_["lr"] = a.lr * 0.5 * (1 + math.cos(math.pi * step / a.adim))
+        prof = a.profil and step <= 8
+        if prof:
+            sync(dev), tt := [time.time()]
         d = nxt.result()
+        if prof:
+            sync(dev), tt.append(time.time())
         if step < a.adim:
             nxt = pool.submit(load, int(order[step]))                                # bir sonraki dizi arka planda
         loss = seq_loss(at, d, a.parca, W_o, a.delta_parca)
+        if prof:
+            sync(dev), tt.append(time.time())
         loss.backward()
+        if prof:
+            sync(dev), tt.append(time.time())
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
+        if prof:
+            sync(dev), tt.append(time.time())
+            log(f"    [profil] adım {step}: veri bekleme {tt[1] - tt[0]:.2f} | ileri {tt[2] - tt[1]:.2f} | "
+                f"geri {tt[3] - tt[2]:.2f} | optimizer {tt[4] - tt[3]:.2f} | toplam {tt[4] - tt[0]:.2f} sn")
         if step % 50 == 0 or step == a.adim:
             per = (time.time() - t0) / step
             log(f"    {name} adım {step}/{a.adim} | kayıp {loss.item():.4f} | {per:.2f} sn/adım | "
@@ -618,6 +636,7 @@ def main() -> None:
             s.add_argument("--soru-agirlik", type=float, default=4.0, help="soru + cevap konumlarının kayıp ağırlığı")
             s.add_argument("--seed", type=int, default=0)
             s.add_argument("--device", default=None)
+            s.add_argument("--profil", action="store_true", help="ilk 8 eğitim adımının süre dökümünü yaz")
             s.add_argument("--en-fazla-katman", type=int, default=0,
                            help="N dönüşüm katmanı eğitilince dur (hız ölçümü; 0 = hepsi)")
             s.add_argument("--cekirdek", choices=["auto", "torch"], default="auto",
