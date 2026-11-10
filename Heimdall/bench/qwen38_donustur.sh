@@ -78,6 +78,11 @@ pk() {   # parola testi: model, bağlamlar
   NGL=99 CTK=${CTK:-q8_0} CTV=${CTV:-q8_0} $LLAMA/build/bin/bifrost_passkey $1 $2 ${PAROLA_D:-0.1,0.5,0.9} ${PAROLA_N:-2} \
     2>/dev/null | grep -E "yanlış|DOĞRU|doğruluk" || true
 }   # bf16 en iyisi ama 27B'de ~110 GB boş disk ister; q8_0 ~60 GB
+ret_hazir() {   # llama.cpp erişimli dikkat yamasıyla derlenmiş mi? Değilse BIFROST_RET sessizce yok sayılır: yeniden derle
+  grep -q BIFROST_RET $LLAMA/src/llama-hparams.cpp 2>/dev/null && return 0
+  echo "-- llama.cpp erişimli dikkat yamasıyla yeniden derleniyor (GPU=${GPU:-vulkan}, birkaç dakika)"
+  GPU=${GPU:-vulkan} DIR=$LLAMA bash llamacpp/kur.sh >/dev/null 2>&1 || { echo "kur.sh başarısız: GPU=vulkan bash llamacpp/kur.sh çıktısına bak"; return 1; }
+}
 hf_dir() { $PY -c "from heimdall.donustur import fetch_model; print(fetch_model('$1'))"; }
 H="$PY -m heimdall.donustur_hibrit"
 command -v "$PY" >/dev/null || { echo "python bulunamadı: önce 'source .venv101/bin/activate' (ya da PY=python3)"; exit 1; }
@@ -205,13 +210,15 @@ case $ADIM in
           pk $G $L
           echo "-- hafıza kapalı (BIFROST_MEM_OFF=1, aynı dosya)"; BIFROST_MEM_OFF=1 pk $G $L
           [ -n "${ORIJ:-}" ] && pk $ORIJ $L ;;
-  erisim)   # tutulan tam dikkat katmanları: tüm KV ↔ çapa + pencere + en iyi 16 blok (BIFROST_RET=k,pencere,blok,çapa)
+  erisim)   # tam dikkat katmanları: tüm KV ↔ çapa + pencere + en iyi 16 blok (BIFROST_RET=k,pencere,blok,çapa). Eğitim yok.
+          #   ERISIM_M=runs/q38/orijinal-Q3_K_M.gguf ADIM=erisim ...   → orijinal modelin 16 dikkat katmanının hepsinde
           G=${ERISIM_M:-$OUT2/q38-27b-h2-$QUANT.gguf}; L=${PAROLA_L:-32768,65536}; R=${RET:-16,2048,64,4}
+          ret_hazir || exit 1
           pk $G $L
           echo "-- BIFROST_RET=$R"; BIFROST_RET=$R pk $G $L
           for r in "" $R; do echo "-- hız, BIFROST_RET=${r:-kapalı}"
             BIFROST_RET=$r $LLAMA/build/bin/llama-bench -m $G -ngl 99 -fa 1 -ctk ${CTK:-q8_0} -ctv ${CTV:-q8_0} \
-              -p 0 -n 64 -d ${DERIN:-32768,65536} 2>/dev/null | grep -E "tg64|error"; done ;;
+              -p 0 -n 64 -d ${DERIN:-0,32768,65536,131072} 2>&1 | grep -E "tg64|error|failed" || true; done ;;
   motorprova)
           M=Qwen/Qwen3.5-0.8B; HFM=$(hf_dir $M); V=veri/qwen_wiki_prova; O=runs/q35_08b_m1
           [ -f $V/wiki_train.bin ] || $H hazirla --model $M --veri $V --tokens 5e6
@@ -233,15 +240,10 @@ case $ADIM in
           OUT2=$OUT3 ADIM=a2test bash "$SELF"
           G=$OUT3/q38-27b-h2-$QUANT.gguf; L=${PAROLA_L:-8192,32768,65536}; R=${RET:-16,2048,64,4}
           echo "-- hafıza kapalı (BIFROST_MEM_OFF=1)"; BIFROST_MEM_OFF=1 pk $G $L
-          # erişimli dikkat yeni yamada: llama.cpp eski yamayla derlenmişse BIFROST_RET sessizce yok sayılır, önce yeniden derle
-          if ! grep -q BIFROST_RET $LLAMA/src/llama-hparams.cpp 2>/dev/null; then
-            echo "-- llama.cpp erişimli dikkat yamasıyla yeniden derleniyor (GPU=${GPU:-vulkan})"
-            GPU=${GPU:-vulkan} DIR=$LLAMA bash llamacpp/kur.sh >/dev/null 2>&1 || echo "kur.sh başarısız: erişimli dikkat testi atlandı"
-          fi
-          if grep -q BIFROST_RET $LLAMA/src/llama-hparams.cpp 2>/dev/null; then
+          if ret_hazir; then
             echo "-- erişimli dikkat (BIFROST_RET=$R)"; BIFROST_RET=$R pk $G 32768,65536
             BIFROST_RET=$R $LLAMA/build/bin/llama-bench -m $G -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 64 \
-              -d 32768,131072 2>&1 | grep -E "^\| qwen" || true
+              -d 32768,131072 2>&1 | grep -E "^\\| qwen" || true
           fi
           echo "motortest bitti" ;;
   sunucu) runtime/valerois-runtime $OUT/q38-27b-bifrost-$QUANT.gguf --bin $LLAMA/build/bin --ctx $CTX ${PORT:+--port $PORT} ;;
