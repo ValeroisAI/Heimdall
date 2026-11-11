@@ -22,6 +22,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _autocast(device_type: str) -> bool:
+    try:
+        return torch.is_autocast_enabled(device_type)
+    except TypeError:                                        # eski PyTorch: yalnız CUDA durumu sorulabilir
+        return device_type == "cuda" and torch.is_autocast_enabled()
+
+
+def _match(weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Ağırlığı girdinin türüne çevir; autocast açıkken ÇEVİRME. Artık akış fp32 olduğundan (norm çıkışı) eski kod her
+    ileri geçişte ağırlığın fp32 kopyasını çıkarıyor, autocast onu yeniden bf16'ya çeviriyor, geri geçişte de gradyan
+    fp32 kopyadan dönüyordu: w12 için parametre başına ~12 bayt gereksiz bellek trafiği. Autocast ikisini de kendi çevirir."""
+    return weight if (weight.dtype == x.dtype or _autocast(x.device.type)) else weight.to(x.dtype)
+
+
 class BitLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, bits: int = 1, rank: int = 0) -> None:
         super().__init__()
@@ -63,7 +77,7 @@ class BitLinear(nn.Module):
             from .bitkernel import bit_int8_linear
             y = bit_int8_linear(x, self.weight)
         else:
-            y = F.linear(x, self.weight.to(x.dtype))
+            y = F.linear(x, _match(self.weight, x))
         y = y * (self.base * self.scale).to(y.dtype)
         if self.rank:
             y = y + F.linear(F.linear(x, self.lr_v.to(x.dtype)), self.lr_u.to(x.dtype))
@@ -95,25 +109,36 @@ class BitFlip(torch.optim.Optimizer):
                 if id(p) not in self._idx:
                     self._idx[id(p)] = torch.randint(0, p.numel(), (min(group["sample"], p.numel()),), device=p.device)
                 idx = self._idx[id(p)]
-                mf = st["m"].float().mul_(beta).add_(p.grad.float(), alpha=1 - beta)
+                # Tek fp32 geçici (mf) + bool maskeler; eski sürüm parametre başına ~7 fp32 geçici kuruyordu
+                # (r, pf, skor, yeni, where sonucu, ...). Karar aynı: skor = itme / satır RMS'i, skor > eşik ise çevir.
+                mf = st["m"].float()
+                mf.mul_(beta).add_(p.grad, alpha=1 - beta)
                 if rate > 0:
-                    r = mf / (mf.square().mean(dim=1, keepdim=True).sqrt() + 1e-12)   # satır başına normalize
-                    pf = p.float()
+                    rms = torch.linalg.vector_norm(mf, dim=1, keepdim=True).mul_(p.size(1) ** -0.5).add_(1e-12)
+                    ms, ps = mf.flatten()[idx], p.flatten()[idx].float()          # eşik için örnek (16K eleman)
+                    rs = ms / rms.flatten()[idx // p.size(1)]
                     if p.bit == 1:
-                        score = (pf * r).clamp(min=0)          # gradyan şu anki işaretin tersine itiyor
-                        thr = torch.quantile(score.flatten()[idx], 1.0 - rate).clamp(min=1e-12)
-                        new = torch.where(score > thr, -pf, pf)
+                        ss = (ps * rs).clamp_(min=0)
                     else:
-                        # yalnız hareket edebilenler yarışır: +1'i yukarı, −1'i aşağı iten momentum bütçe harcamaz
-                        score = torch.where(((pf >= 1) & (r < 0)) | ((pf <= -1) & (r > 0)), 0.0, r.abs())
-                        thr = torch.quantile(score.flatten()[idx], 1.0 - rate).clamp(min=1e-12)
-                        new = (pf - torch.sign(r) * (score > thr)).clamp(-1, 1)
-                    changed = new != pf
-                    p.copy_(new.to(p.dtype))
-                    mf = torch.where(changed, torch.zeros_like(mf), mf)   # çevrilenin momentumu sıfırlanır
-                    flipped += int(changed.sum())
+                        ss = torch.where(((ps >= 1) & (rs < 0)) | ((ps <= -1) & (rs > 0)), 0.0, rs.abs())
+                    thr = torch.quantile(ss, 1.0 - rate).clamp(min=1e-12)
+                    lim = rms * thr                                                # satır başına eşik [satır, 1]
+                    if p.bit == 1:
+                        mf.mul_(p)                              # itme = m·w (w = ±1): yerinde, sonra geri alınır
+                        mask = mf > lim
+                        mf.mul_(p)                              # ±1 ile çarpım kayıpsız: mf eski haline döner
+                        p[mask] = -p[mask]                      # yalnız çevrilenler (≈ %0.5) okunur/yazılır
+                    else:
+                        up, down = mf < -lim, mf > lim          # r < 0: yukarı, r > 0: aşağı bir basamak
+                        up &= p < 1                             # +1 daha yukarı, −1 daha aşağı gidemez
+                        down &= p > -1
+                        p[up] += 1
+                        p[down] -= 1
+                        mask = up.logical_or_(down)
+                    mf.masked_fill_(mask, 0.0)                  # çevrilenin momentumu sıfırlanır
+                    flipped += int(mask.sum())
                 total += p.numel()
-                st["m"].copy_(mf.to(st["m"].dtype))
+                st["m"].copy_(mf)
         self.last_flip_frac = flipped / max(total, 1)
 
 
