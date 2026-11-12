@@ -48,12 +48,24 @@ def main():
         torch.cuda.synchronize()
         return (time.time() - t) / n * 1e3
 
-    t_f = timed(fwd, a.n)
-    o = fwd()
-    t_b = timed(lambda: torch.autograd.grad(o, (q, k, v, g, beta), do, retain_graph=True), a.n)
-    flops = 4 * a.b * a.t * a.h * a.d * a.d * 2                              # kaba: durum güncellemesi + okuma
-    print(f"ileri {t_f:6.2f} ms | geri {t_b:6.2f} ms | geri/ileri {t_b / t_f:4.1f}× | "
-          f"ileri ≈ {flops / t_f / 1e9:.1f} TFLOPS (kaba)")
+    def measure(tag):
+        t_f = timed(fwd, a.n)
+        o = fwd()
+        grads = torch.autograd.grad(o, (q, k, v, g, beta), do, retain_graph=True)
+        t_b = timed(lambda: torch.autograd.grad(o, (q, k, v, g, beta), do, retain_graph=True), a.n)
+        print(f"{tag:22} ileri {t_f:6.2f} ms | geri {t_b:6.2f} ms | geri/ileri {t_b / t_f:4.1f}×", flush=True)
+        return o.detach().float(), [x.float() for x in grads], t_f + t_b
+
+    o0, g0, t0 = measure("fla varsayılan ayarlar")
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+    from heimdall.kernels import fla_tune_wide
+    print(f"autotune: {fla_tune_wide(force=True)} (ilk çağrıda bütün ayarlar denenir, biraz sürer)", flush=True)
+    o1, g1, t1 = measure("geniş arama (8/16 warp)")
+    rel = lambda x, y: float((x - y).norm() / y.norm().clamp_min(1e-12))
+    err = max([rel(o1, o0)] + [rel(x, y) for x, y in zip(g1, g0)])
+    print(f"sonuç farkı (çıkış ve tüm gradyanlar, en büyük göreli): {err:.1e} | ileri+geri {t0:.2f} → {t1:.2f} ms "
+          f"({t0 / t1:.2f}× hız)")
 
 
 if __name__ == "__main__":

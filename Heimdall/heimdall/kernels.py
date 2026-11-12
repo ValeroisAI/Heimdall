@@ -140,6 +140,36 @@ def delta_rule_step(q, k, v, g, beta, state):
 
 _FLA = None  # doğrulanmış flash-linear-attention fonksiyonu (prepare() ayarlar)
 
+# fla'nın gated delta rule durum çekirdekleri (ileri h, geri dh) NVIDIA dışı ve Intel dışı kartlarda yalnız 2-4 warp ve
+# BV=32 dener. RX 9070 XT'de geri çekirdek ileriden ~12 kat yavaş ölçüldü (bench/fla_hiz.py). Bu kartlarda arama alanını
+# genişletiriz (8/16 warp, BV 16/32/64): sonuç aynı kalır (yalnız iş dağılımı değişir), en hızlıyı Triton seçer.
+_FLA_TUNE_KERNELS = ("chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64", "chunk_gated_delta_rule_fwd_kernel_h_blockdim64")
+
+
+def fla_tune_wide(force: bool = False) -> str:
+    """ROCm'da (ya da force) fla durum çekirdeklerinin autotune alanını genişlet. Ne yapıldığını döndürür."""
+    if not (force or torch.version.hip):
+        return "gerek yok (ROCm değil)"
+    try:
+        import triton
+        from fla.ops.common import chunk_delta_h as mod
+    except Exception as e:
+        return f"atlandı ({type(e).__name__})"
+    done = []
+    for name in _FLA_TUNE_KERNELS:
+        obj = getattr(mod, name, None)
+        while obj is not None and not hasattr(obj, "configs"):     # @triton.heuristics → autotuner → jit
+            obj = getattr(obj, "fn", None)
+        if obj is None:
+            continue
+        stages = sorted({c.num_stages for c in obj.configs}) or [1]
+        obj.configs = [triton.Config({"BV": bv}, num_warps=w, num_stages=st)
+                       for w in (2, 4, 8, 16) for st in stages for bv in (16, 32, 64)]
+        if hasattr(obj, "cache"):
+            obj.cache = {}                                         # önceki seçimler eski alandan: yeniden ölç
+        done.append(f"{name.split('_kernel_')[1]}: {len(obj.configs)} ayar")
+    return "genişletildi: " + ", ".join(done) if done else "çekirdek bulunamadı (fla sürümü farklı)"
+
 
 @torch.compiler.disable
 def _fla_apply(q, k, v, g, beta, initial_state):
@@ -176,11 +206,12 @@ def prepare(device: torch.device, backend: str = "auto") -> str:
         s0 = torch.randn(b, h, d, d, generator=gen) * 0.1
         ref_o, ref_s = delta_rule_reference(q, k, v, g, beta, 64, s0)
         _FLA = cand
+        tune = fla_tune_wide()
         o, s = _fla_apply(*(z.to(device) for z in (q, k, v, g, beta, s0)))
         err = max(((o.float().cpu() - ref_o).norm() / ref_o.norm()).item(),
                   ((s.float().cpu() - ref_s).norm() / ref_s.norm()).item())
         if err < 0.03:
-            return f"flash-linear-attention (göreli hata {err:.4f})"
+            return f"flash-linear-attention (göreli hata {err:.4f}; autotune {tune})"
         warnings.warn(f"flash-linear-attention referansla uyuşmuyor (göreli hata {err:.3f}); PyTorch kullanılacak")
     except Exception as e:  # sürüm/arka uç uyumsuzluğu: güvenli yola dön
         warnings.warn(f"flash-linear-attention çalışmadı ({type(e).__name__}: {e}); PyTorch kullanılacak")

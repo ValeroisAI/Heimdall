@@ -108,6 +108,8 @@ def prepare_fast(dev, log, which: str = "auto") -> str:
     except Exception:
         log("hızlı çekirdek yok (pip install flash-linear-attention): PyTorch yolu kullanılıyor")
         return "PyTorch"
+    from .kernels import fla_tune_wide
+    log(f"fla autotune: {fla_tune_wide()}")
     log("hızlı çekirdek sınanıyor (ilk seferde Triton çekirdekleri bu GPU için derlenir: birkaç dakika sürebilir)")
     t0 = time.time()
     gen = torch.Generator().manual_seed(0)
