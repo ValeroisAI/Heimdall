@@ -92,11 +92,24 @@ def main():
     prof.export_chrome_trace(a.out)
 
     gpu = dev.type == "cuda"
-    rows = []
+    # Yalnız GPU çekirdekleri: bir PyTorch işleminin (aten::mm, autograd düğümü, Optimizer.step) süresi altındaki
+    # çekirdeklerin toplamıdır, ikisini birden saymak süreyi iki katına çıkarır. ROCm bazı çekirdekleri ".kd" ekiyle
+    # ikinci kez bildirir: ek atılıp tek sayılır.
+    from torch.autograd import DeviceType
+    agg = {}
     for e in prof.key_averages():
-        t = (e.self_device_time_total if gpu else e.self_cpu_time_total) / 1e3        # ms
-        if t > 0 and (gpu or e.key.startswith("aten::")):
-            rows.append((e.key, t, e.count))
+        if gpu:
+            if getattr(e, "device_type", None) != DeviceType.CUDA:
+                continue
+            t = e.self_device_time_total / 1e3                                          # ms
+        else:
+            if not e.key.startswith("aten::"):
+                continue
+            t = e.self_cpu_time_total / 1e3
+        k = e.key[:-3] if e.key.endswith(".kd") else e.key
+        if t > 0 and t >= agg.get(k, (0, 0))[0]:
+            agg[k] = (t, e.count)
+    rows = [(k, t, c) for k, (t, c) in agg.items()]
     total = sum(r[1] for r in rows)
     wall = prof.profiler.self_cpu_time_total / 1e3 if not gpu else None
     by = collections.defaultdict(float)
