@@ -64,6 +64,8 @@ def parse_args(argv=None):
     p.add_argument("--compile", dest="compile", action="store_true", default=True)
     p.add_argument("--no-compile", dest="compile", action="store_false")
     p.add_argument("--kernel", choices=["auto", "torch"], default="auto")
+    p.add_argument("--tunableop", action="store_true",
+                   help="GEMM algoritmalarını bu kartta ölç ve en hızlısını kullan (ilk adımlar yavaş; out/tunableop.csv)")
     p.add_argument("--device", default=None)
     p.add_argument("--out", default="runs/heimdall")
     p.add_argument("--resume")
@@ -139,6 +141,9 @@ def main(argv=None) -> None:
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
     backend = kernels.prepare(device, cfg.kernel)
+    if args.tunableop:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        print(f"TunableOp: {kernels.enable_tunableop(Path(args.out) / 'tunableop.csv')}", flush=True)
 
     model = HeimdallLM(cfg).to(device)
     model.grad_ckpt = grad_ckpt

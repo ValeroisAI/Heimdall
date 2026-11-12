@@ -159,20 +159,30 @@ def test_bitflip_step_equals_reference():
             ref_m = opt.state[p]["m"].clone()
 
 
-def test_bitlinear_autocast_equals_explicit_cast():
-    """Autocast altında ağırlık çevrilmeden verilir; çıktı ve gradyanlar eski (açık çevirmeli) yolla aynı."""
+def test_bitlinear_scale_folded_equals_scaled_output():
+    """Ölçeği ağırlığa katan ileri geçiş, eski (çıktıyı ölçekleyen) yolla aynı çıktı ve gradyanları verir:
+    fp32'de yuvarlama düzeyinde, bf16 autocast altında bf16 hassasiyetinde."""
     import torch.nn.functional as F
     from heimdall.bit import BitLinear
-    torch.manual_seed(0)
-    lin = BitLinear(64, 48, 1, rank=4)
-    with torch.no_grad():
-        lin.lr_u.normal_(std=0.1)
-    x = torch.randn(3, 5, 64, requires_grad=True)                     # fp32 girdi (norm çıkışı gibi)
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        y = lin(x)
-        ref = F.linear(x, lin.weight.to(x.dtype)) * (lin.base * lin.scale).to(torch.bfloat16)
-        ref = ref + F.linear(F.linear(x, lin.lr_v.to(x.dtype)), lin.lr_u.to(x.dtype))
-    assert y.dtype == ref.dtype and torch.equal(y, ref)
-    g = torch.autograd.grad(y.float().square().sum(), [lin.weight, x], retain_graph=True)
-    gr = torch.autograd.grad(ref.float().square().sum(), [lin.weight, x])
-    assert g[0].dtype == lin.weight.dtype and torch.equal(g[0], gr[0]) and torch.equal(g[1], gr[1])
+    for bits in (1, 2):
+        torch.manual_seed(bits)
+        lin = BitLinear(64, 48, bits, rank=4)
+        with torch.no_grad():
+            lin.lr_u.normal_(std=0.1)
+            lin.scale.uniform_(0.5, 1.5)
+        x = torch.randn(3, 5, 64, requires_grad=True)
+        params = [lin.weight, lin.scale, lin.lr_u, lin.lr_v, x]
+        for amp, tol in ((False, 1e-5), (True, 3e-2)):
+            ctx = torch.autocast("cpu", dtype=torch.bfloat16) if amp else torch.autocast("cpu", enabled=False)
+            with ctx:
+                y = lin(x)
+                dt = torch.bfloat16 if amp else torch.float32
+                ref = F.linear(x, lin.weight.to(dt)) * (lin.base * lin.scale).to(dt)
+                ref = ref + F.linear(F.linear(x, lin.lr_v.to(dt)), lin.lr_u.to(dt))
+            rel = lambda u, v: float((u.float() - v.float()).norm() / v.float().norm().clamp_min(1e-12))
+            assert y.dtype == ref.dtype and rel(y, ref) < tol, (bits, amp, rel(y, ref))
+            w = torch.randn_like(y.float())
+            g = torch.autograd.grad((y.float() * w).sum(), params)
+            gr = torch.autograd.grad((ref.float() * w).sum(), params)
+            for name, u, v in zip(("weight", "scale", "lr_u", "lr_v", "x"), g, gr):
+                assert u.dtype == v.dtype and rel(u, v) < tol, (bits, amp, name, rel(u, v))

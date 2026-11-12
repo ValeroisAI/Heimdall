@@ -217,3 +217,18 @@ def prepare(device: torch.device, backend: str = "auto") -> str:
         warnings.warn(f"flash-linear-attention çalışmadı ({type(e).__name__}: {e}); PyTorch kullanılacak")
     _FLA = None
     return "torch"
+
+
+def enable_tunableop(path) -> str:
+    """ROCm/CUDA GEMM'leri için PyTorch TunableOp: her matris boyutunda hipBLASLt/rocBLAS algoritmalarını dener, en
+    hızlısını seçer ve dosyaya yazar (sonraki koşular dosyadan okur, yeniden denemez). İlk adımlar yavaşlar."""
+    if not torch.cuda.is_available():
+        return "kapalı (GPU yok)"
+    try:
+        tun = torch.cuda.tunable
+        tun.enable(True)
+        tun.tuning_enable(True)
+        tun.set_filename(str(path))
+        return f"açık ({path})"
+    except Exception as e:  # eski PyTorch
+        return f"kullanılamadı ({type(e).__name__})"

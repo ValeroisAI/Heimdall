@@ -76,9 +76,14 @@ class BitLinear(nn.Module):
         if self.kernel == "int8" and x.is_cuda:
             from .bitkernel import bit_int8_linear
             y = bit_int8_linear(x, self.weight)
+            y = y * (self.base * self.scale).to(y.dtype)
         else:
-            y = F.linear(x, _match(self.weight, x))
-        y = y * (self.base * self.scale).to(y.dtype)
+            # Satır ölçeği ağırlığa katılır: x·(W ⊙ s)ᵀ = (x·Wᵀ) ⊙ s. Fark geri geçişte: ölçeğin gradyanı ağırlık boyutunda
+            # (satır içi toplam) hesaplanır, çıktı boyutunda (16K token × 4096 kanal, sütun toplamı) değil; çıktı üzerinde
+            # ayrı bir çarpma geçişi de kalmaz. W'nin gradyanı aynı: dW = d(W ⊙ s) ⊙ s.
+            s = (self.base * self.scale)[:, None]
+            dt = torch.get_autocast_dtype(x.device.type) if _autocast(x.device.type) else x.dtype
+            y = F.linear(x, (self.weight.to(dt) * s.to(dt)))
         if self.rank:
             y = y + F.linear(F.linear(x, self.lr_v.to(x.dtype)), self.lr_u.to(x.dtype))
         return y

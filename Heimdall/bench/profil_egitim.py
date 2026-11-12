@@ -54,6 +54,7 @@ def main():
     p.add_argument("--micro", type=int, default=8)
     p.add_argument("--steps", type=int, default=3)
     p.add_argument("--no-compile", dest="compile", action="store_false", default=True)
+    p.add_argument("--tunableop", action="store_true", help="GEMM algoritma seçimi (ısınmada ölçülür, runs/tunableop.csv)")
     p.add_argument("--out", default="runs/profil_egitim.json", help="Chrome/Perfetto izi (chrome://tracing)")
     a = p.parse_args()
 
@@ -63,6 +64,8 @@ def main():
         from dataclasses import replace
         cfg = replace(cfg, bits=a.bits)
     print(f"delta çekirdeği: {kernels.prepare(dev, cfg.kernel)}")
+    if a.tunableop:
+        print(f"TunableOp: {kernels.enable_tunableop(Path('runs/tunableop.csv'))}")
     model = HeimdallLM(cfg).to(dev)
     opts = build_optimizers(model, 0.02, 2e-3)
     fwd = torch.compile(model) if (a.compile and dev.type == "cuda") else model
@@ -78,7 +81,7 @@ def main():
             o.step()
             o.zero_grad(set_to_none=True)
 
-    for _ in range(3):                                            # derleme + ısınma
+    for _ in range(6 if a.tunableop else 3):                      # derleme + ısınma (+ TunableOp ölçümü)
         step()
     if dev.type == "cuda":
         torch.cuda.synchronize()
