@@ -161,8 +161,10 @@ def main(argv=None) -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "config.json").write_text(json.dumps({"model": cfg.to_dict(), "args": vars(args)}, indent=2))
+    (out / "config.json").write_text(json.dumps({"model": cfg.to_dict(), "args": vars(args), "delta_cekirdegi": backend},
+                                                indent=2, ensure_ascii=False))
     logf = open(out / "log.jsonl", "a")
+    logf.write(json.dumps({"basla": step, "delta_cekirdegi": backend}, ensure_ascii=False) + "\n")
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU"
     hip = f" ROCm {torch.version.hip}" if torch.version.hip else ""
     print(f"Heimdall [{args.arch}, düzen {cfg.layout}] {model.num_params() / 1e6:.1f}M param ({model.active_params() / 1e6:.0f}M aktif) | d={cfg.d_model} "
