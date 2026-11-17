@@ -7,7 +7,7 @@ Düello: eşit GPU süresinde hangi model metni daha iyi öğrenir? Ölçü bit/
 
 Kollar (hepsi aynı metinde, aynı süre, aynı optimizer ayarı):
     tf      düz Transformer, 8K token            hibrit   DeltaNet + dikkat, 8K token
-    kisa    LFM2 tarzı: kısa evrişim ×3 + dikkat, 8K token
+    kisa    kısa evrişim ×3 + NoPE dikkat, 8K token  kisa_rope  aynısı, dikkat RoPE'lu (LFM2 gibi)
     bayt    hibrit, bayt düzeyi, yamasız (kontrol: baytın kendisi ne kaybettiriyor)
     yama8   bayt + yama 8  (gövde ~2.5× büyük)   yama16   bayt + yama 16 (gövde ~5× büyük)
 Bayt verisi token dosyasının çözülmesiyle üretilir (aynı metin); doğrulama aynı metnin son %0.5'i.
@@ -83,6 +83,7 @@ def arms(base: HeimdallConfig, small: bool):
         "tf": (lambda: HeimdallLM(apply_arch(base, "transformer")), "token", t_tok, mb_tok),
         "hibrit": (lambda: HeimdallLM(apply_arch(base, "hibrit")), "token", t_tok, mb_tok),
         "kisa": (lambda: HeimdallLM(apply_arch(base, "kisa")), "token", t_tok, mb_tok),
+        "kisa_rope": (lambda: HeimdallLM(replace(apply_arch(base, "kisa"), attn_rope="rope")), "token", t_tok, mb_tok),
         "bayt": (lambda: HeimdallLM(replace(apply_arch(base, "hibrit"), vocab_size=256)), "bayt", t_byte, mb_byte // 3 or 1),
         "yama8": (lambda: PatchLM(PatchConfig(trunk(*(wide or (768, 6, 12))), patch=8, d_local=dl)), "bayt", t_byte, mb_byte),
         "yama16": (lambda: PatchLM(PatchConfig(trunk(*(wide or (1024, 8, 16))), patch=16, d_local=dl)), "bayt", t_byte, mb_byte),

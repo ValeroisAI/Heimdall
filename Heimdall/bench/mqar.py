@@ -2,7 +2,7 @@
 MQAR (çoklu anahtar-değer hatırlama): dizinin başında 8 anahtar→değer çifti (bazıları güncellenir), araya boşluk,
 sonra anahtarlar sorulur; doğru cevap anahtarın SON değeridir. Eğitimde boşluk ≤ 64, testte 16K'ya kadar.
 
-    python bench/mqar.py H 8      # H = hibrit (delta + dikkat), C = kısa evrişim + dikkat, A = saf dikkat, R = saf delta; 8 = dakika
+    python bench/mqar.py H 8      # H = hibrit (delta + dikkat), C = kısa evrişim + dikkat (RoPE), N = kısa evrişim + NoPE dikkat, A = saf dikkat, R = saf delta; 8 = dakika
 """
 import json, sys, time
 from pathlib import Path
@@ -61,7 +61,8 @@ base = HeimdallConfig(vocab_size=VOCAB, d_model=64, n_layers=2, n_heads=1, head_
 cfg = {"R": base.__class__(**{**base.to_dict(), "layout": "D"}),
        "A": base.__class__(**{**base.to_dict(), "layout": "A", "attn_rope": "rope"}),
        "H": base.__class__(**{**base.to_dict(), "layout": "DA"}),
-       "C": base.__class__(**{**base.to_dict(), "layout": "CA"})}[kind]
+       "C": base.__class__(**{**base.to_dict(), "layout": "CA"}),
+       "N": base.__class__(**{**base.to_dict(), "layout": "CA", "attn_rope": "none"})}[kind]
 torch.manual_seed(0); m = HeimdallLM(cfg)
 opts = build_optimizers(m, 0.02, 3e-3)
 rng = np.random.default_rng(0); t0 = time.time(); step = 0

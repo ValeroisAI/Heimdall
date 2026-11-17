@@ -29,7 +29,7 @@ class HeimdallConfig:
     attn_kv_heads: int = 4         # GQA: KV cache attn_heads / attn_kv_heads kat küçülür
     attn_head_dim: int = 64
     attn_window: int = 0           # 0 = global; > 0 = kayan pencere (çıkarım belleği O(1))
-    attn_rope: str = "auto"        # auto: hibritte NoPE (konumu DeltaNet taşır), pencere/Transformer'da RoPE
+    attn_rope: str = "auto"        # auto: D ya da C varsa NoPE (konumu onlar taşır), pencere/Transformer'da RoPE
     attn_gate: bool = True         # dikkat çıkışında sigmoid kapı
     rope_base: float = 10_000.0
     # FFN ve çıkış
@@ -74,7 +74,7 @@ class HeimdallConfig:
     def use_rope(self) -> bool:
         if self.attn_rope != "auto":
             return self.attn_rope == "rope"
-        return "D" not in self.layout or self.attn_window > 0
+        return not ({"D", "C"} & set(self.layout)) or self.attn_window > 0   # D ve C konumu kendisi taşır
 
     @property
     def ffn_hidden(self) -> int:
@@ -96,7 +96,7 @@ def apply_arch(cfg: HeimdallConfig, arch: str) -> HeimdallConfig:
         return replace(cfg, layout="DDDA", attn_window=0, bits=2, bit_scope="ffn", bit_rank=16)
     if arch == "transformer":   # taban: her katman tam dikkat, RoPE, MHA
         return replace(cfg, layout="A", attn_window=0, attn_kv_heads=cfg.attn_heads)
-    if arch == "kisa":          # LFM2 tarzı: 3 kapılı kısa evrişim + 1 global dikkat (RoPE); DeltaNet yok
+    if arch == "kisa":          # LFM2 tarzı: 3 kapılı kısa evrişim + 1 global dikkat (NoPE: uzunluğa genellenir); DeltaNet yok
         return replace(cfg, layout="CCCA", attn_window=0)
     if arch == "sabit":         # global dikkat yok: çıkarım belleği bağlamdan bağımsız
         return replace(cfg, layout="DDDA", attn_window=cfg.attn_window or 1024)
