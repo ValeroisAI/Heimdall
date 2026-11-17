@@ -52,7 +52,9 @@ def main():
     p.add_argument("--bits", type=int, default=1)
     p.add_argument("--seq-len", type=int, default=2048)
     p.add_argument("--micro", type=int, default=8)
-    p.add_argument("--steps", type=int, default=3)
+    p.add_argument("--steps", type=int, default=1, help="optimizer adımı")
+    p.add_argument("--accum", type=int, default=16,
+                   help="optimizer adımı başına mikro-batch (eğitimde 262144 / (8 × 2048) = 16)")
     p.add_argument("--no-compile", dest="compile", action="store_false", default=True)
     p.add_argument("--tunableop", action="store_true", help="GEMM algoritma seçimi (ısınmada ölçülür, runs/tunableop.csv)")
     p.add_argument("--out", default="runs/profil_egitim.json", help="Chrome/Perfetto izi (chrome://tracing)")
@@ -72,17 +74,18 @@ def main():
     amp = torch.autocast(dev.type, dtype=torch.bfloat16) if dev.type == "cuda" else nullcontext()
     x = torch.randint(0, cfg.vocab_size, (a.micro, a.seq_len + 1), device=dev)
 
-    def step():
-        with amp:
-            loss = fwd(x[:, :-1], x[:, 1:])
-        loss.backward()
+    def step(accum=None):
+        for _ in range(accum or a.accum):
+            with amp:
+                loss = fwd(x[:, :-1], x[:, 1:])
+            loss.backward()
         torch.nn.utils.clip_grad_norm_([q for q in model.parameters() if not getattr(q, "bit", 0)], 1.0)
         for o in opts:
             o.step()
             o.zero_grad(set_to_none=True)
 
     for _ in range(6 if a.tunableop else 3):                      # derleme + ısınma (+ TunableOp ölçümü)
-        step()
+        step(accum=1)
     if dev.type == "cuda":
         torch.cuda.synchronize()
     acts = [torch.profiler.ProfilerActivity.CPU] + ([torch.profiler.ProfilerActivity.CUDA] if dev.type == "cuda" else [])
@@ -104,6 +107,8 @@ def main():
         if gpu:
             if getattr(e, "device_type", None) != DeviceType.CUDA:
                 continue
+            if e.key.startswith(("Optimizer.", "ProfilerStep", "autograd::")) or "#" in e.key:
+                continue                                       # GPU üstündeki özet aralıklar: altındaki çekirdekler sayılıyor
             t = e.self_device_time_total / 1e3                                          # ms
         else:
             if not e.key.startswith("aten::"):
@@ -118,8 +123,8 @@ def main():
     by = collections.defaultdict(float)
     for k, t, _ in rows:
         by[group_of(k)] += t
-    tok = a.steps * a.micro * a.seq_len
-    print(f"\n{a.arch} | {sum(q.numel() for q in model.parameters()) / 1e6:.0f}M param | {a.steps} adım × {a.micro}×{a.seq_len} token"
+    tok = a.steps * a.accum * a.micro * a.seq_len
+    print(f"\n{a.arch} | {sum(q.numel() for q in model.parameters()) / 1e6:.0f}M param | {a.steps} optimizer adımı × {a.accum} mikro-batch × {a.micro}×{a.seq_len} token"
           f" | {'GPU' if gpu else 'CPU'} süresi toplam {total:.0f} ms → {tok / (total / 1e3):,.0f} token/s (yalnız çekirdekler)")
     print("\nGRUP                              süre (ms)    pay")
     for g, t in sorted(by.items(), key=lambda kv: -kv[1]):
