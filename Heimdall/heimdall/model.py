@@ -92,6 +92,36 @@ class GatedDeltaNet(nn.Module):
         return self.o_proj(o.reshape(b, t, self.inner))
 
 
+class ShortConv(nn.Module):
+    """Kapılı kısa evrişim (LFM2): B, C, x = W_in·h;  y = C ⊙ conv_k(B ⊙ x);  çıkış W_o·y.
+    Kanal başına nedensel evrişim (k = conv_short), hafıza durumu yok: çıkarımda yalnız son k-1 tokeni tutar."""
+
+    def __init__(self, cfg: HeimdallConfig) -> None:
+        super().__init__()
+        d = cfg.d_model
+        self.d, self.k = d, cfg.conv_short
+        self.in_proj = _lin(cfg, "mix", d, 3 * d)
+        self.in_proj.weight.muon_split = (d, d, d)
+        self.conv = nn.Parameter(torch.zeros(d, self.k))
+        self.o_proj = _lin(cfg, "mix", d, d)
+
+    def reset_parameters(self) -> None:
+        with torch.no_grad():
+            self.conv.normal_(0, 0.02)
+            self.conv[:, -1] += 1.0                                    # başlangıçta kimliğe yakın
+
+    def empty_cache(self, batch: int, device, dtype) -> dict:
+        return {"conv": torch.zeros(batch, self.k - 1, self.d, device=device, dtype=dtype)}
+
+    def forward(self, x, cache: Optional[dict] = None, pos=None, lens=None):
+        b_, c_, h = self.in_proj(x).chunk(3, dim=-1)
+        bx = b_ * h
+        y = causal_conv(bx, self.conv, None if cache is None else cache["conv"])
+        if cache is not None:
+            cache["conv"] = torch.cat((cache["conv"], bx.to(cache["conv"].dtype)), 1)[:, -(self.k - 1):]
+        return self.o_proj(c_ * y)
+
+
 class Attention(nn.Module):
     def __init__(self, cfg: HeimdallConfig) -> None:
         super().__init__()
@@ -246,7 +276,7 @@ class Block(nn.Module):
         super().__init__()
         self.kind = kind
         self.norm1 = RMSNorm(cfg.d_model, cfg.norm_eps)
-        self.mixer = GatedDeltaNet(cfg) if kind == "D" else Attention(cfg)
+        self.mixer = {"D": GatedDeltaNet, "A": Attention, "C": ShortConv}[kind](cfg)
         self.norm2 = RMSNorm(cfg.d_model, cfg.norm_eps)
         self.ffn = MoE(cfg) if cfg.moe_experts else SwiGLU(cfg.d_model, cfg.ffn_hidden, cfg.bits if cfg.bit_scope in ("all", "ffn") else 0, cfg.bit_rank)
 
@@ -289,7 +319,7 @@ class HeimdallLM(nn.Module):
                 nn.init.normal_(m.weight, std=0.02)
                 if getattr(m, "bias", None) is not None:
                     nn.init.zeros_(m.bias)
-            if isinstance(m, GatedDeltaNet):
+            if isinstance(m, (GatedDeltaNet, ShortConv)):
                 m.reset_parameters()
         for name, m in self.named_modules():  # artık dal çıkışları sıfırdan başlar
             if name.endswith(("o_proj", "w3")):

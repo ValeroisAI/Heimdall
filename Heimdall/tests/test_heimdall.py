@@ -19,7 +19,7 @@ from heimdall.kernels import delta_rule_reference, delta_rule_step  # noqa: E402
 BASE = HeimdallConfig(vocab_size=300, d_model=64, n_layers=4, n_heads=2, head_dim=32, archival_heads=1,
                       attn_heads=4, attn_kv_heads=2, attn_head_dim=16, chunk_size=16, kernel="torch")
 VARIANTS = {"hibrit": apply_arch(BASE, "hibrit"), "transformer": apply_arch(BASE, "transformer"),
-            "sabit": replace(apply_arch(BASE, "sabit"), attn_window=8),
+            "sabit": replace(apply_arch(BASE, "sabit"), attn_window=8), "kisa": apply_arch(BASE, "kisa"),
             "moe": replace(apply_arch(BASE, "hibrit"), moe_experts=8, moe_topk=2, moe_hidden=32)}
 
 

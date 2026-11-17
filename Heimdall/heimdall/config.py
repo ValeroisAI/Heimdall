@@ -4,6 +4,7 @@ Heimdall yapılandırması, mimari türleri ve 16 GB için eğitim ön ayarları
 Katman düzeni `layout` ile verilir ve derinlik boyunca tekrarlanır:
     D = Gated DeltaNet (doğrusal zamanlı, sabit boyutlu durum)
     A = dikkat (global ya da `attn_window` > 0 ise kayan pencere)
+    C = kapılı kısa evrişim (LFM2 tarzı: y = C ⊙ conv₃(B ⊙ x); hafıza durumu yok, çok ucuz)
 "DDDA" = her 4 katmandan 3'ü DeltaNet, 1'i dikkat. "A" = saf Transformer (karşılaştırma tabanı).
 """
 
@@ -21,6 +22,7 @@ class HeimdallConfig:
     head_dim: int = 128
     archival_heads: int = 2        # α ≡ 1 (hiç unutmayan) kafa sayısı: çok uzun bağlamda hatırlama
     conv_kernel: int = 4           # q/k/v üzerinde nedensel kısa conv
+    conv_short: int = 3            # C katmanı: kapılı kısa evrişimin pencere boyu
     chunk_size: int = 64
     # dikkat
     attn_heads: int = 12
@@ -53,7 +55,8 @@ class HeimdallConfig:
     mtp_weight: float = 0.3
 
     def __post_init__(self) -> None:
-        assert self.layout and set(self.layout) <= {"D", "A"}, "layout yalnız D ve A içerebilir"
+        assert self.layout and set(self.layout) <= {"D", "A", "C"}, "layout yalnız D, A ve C içerebilir"
+        assert self.conv_short >= 2
         assert self.attn_heads % self.attn_kv_heads == 0, "attn_heads, attn_kv_heads'e bölünmeli"
         assert 0 <= self.archival_heads <= self.n_heads
         assert self.conv_kernel >= 2 and self.head_dim % 2 == 0 and self.attn_head_dim % 2 == 0
@@ -83,7 +86,7 @@ class HeimdallConfig:
 
 
 # Mimari türleri: aynı ön ayarın üç biçimi (adil karşılaştırma için aynı genişlik/derinlik)
-ARCHS = ("hibrit", "transformer", "sabit", "bit")
+ARCHS = ("hibrit", "transformer", "sabit", "bit", "kisa")
 
 
 def apply_arch(cfg: HeimdallConfig, arch: str) -> HeimdallConfig:
@@ -93,6 +96,8 @@ def apply_arch(cfg: HeimdallConfig, arch: str) -> HeimdallConfig:
         return replace(cfg, layout="DDDA", attn_window=0, bits=2, bit_scope="ffn", bit_rank=16)
     if arch == "transformer":   # taban: her katman tam dikkat, RoPE, MHA
         return replace(cfg, layout="A", attn_window=0, attn_kv_heads=cfg.attn_heads)
+    if arch == "kisa":          # LFM2 tarzı: 3 kapılı kısa evrişim + 1 global dikkat (RoPE); DeltaNet yok
+        return replace(cfg, layout="CCCA", attn_window=0)
     if arch == "sabit":         # global dikkat yok: çıkarım belleği bağlamdan bağımsız
         return replace(cfg, layout="DDDA", attn_window=cfg.attn_window or 1024)
     raise ValueError(f"bilinmeyen mimari: {arch}")

@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .config import HeimdallConfig
-from .model import Block, GatedDeltaNet, RMSNorm
+from .model import Block, GatedDeltaNet, RMSNorm, ShortConv
 
 
 @dataclass
@@ -59,7 +59,7 @@ class PatchLM(nn.Module):
                 nn.init.normal_(m.weight, std=0.02)
                 if getattr(m, "bias", None) is not None:
                     nn.init.zeros_(m.bias)
-            if isinstance(m, GatedDeltaNet):
+            if isinstance(m, (GatedDeltaNet, ShortConv)):
                 m.reset_parameters()
         for name, m in self.named_modules():                       # artık dal çıkışları sıfırdan başlar
             if name.endswith(("o_proj", "w3")) and isinstance(m, nn.Linear):

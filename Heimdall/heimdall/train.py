@@ -93,6 +93,8 @@ def flops_per_token(cfg: HeimdallConfig, n_matmul: int, t: int) -> float:
         if kind == "A":
             span = min(cfg.attn_window or t, t)
             f += 3 * 2 * 2 * cfg.attn_heads * cfg.attn_head_dim * span / (1 if cfg.attn_window else 2)
+        elif kind == "C":
+            f += 3 * 2 * cfg.conv_short * cfg.d_model
         else:
             f += 3 * 2 * 3 * cfg.n_heads * cfg.head_dim * (cfg.chunk_size + cfg.head_dim)
     return f
